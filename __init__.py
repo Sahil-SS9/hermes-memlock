@@ -16,14 +16,25 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .detection import (
-    audit_anchors,
-    find_summary,
-    hash_summary_body,
-    semantic_audit_anchors,
-    split_context,
-)
-from .store import SessionStore
+try:
+    from .detection import (
+        audit_anchors,
+        find_summary,
+        hash_summary_body,
+        semantic_audit_anchors,
+        split_context,
+    )
+    from .store import SessionStore
+except ImportError:
+    # Loaded as a plain module (plugin loaders that exec the file, pytest)
+    from detection import (  # type: ignore[no-redef]
+        audit_anchors,
+        find_summary,
+        hash_summary_body,
+        semantic_audit_anchors,
+        split_context,
+    )
+    from store import SessionStore  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +430,8 @@ def _pin_handler(args: dict | None = None, **kwargs) -> str:
 
     # Prefer forwarded session_id; fall back to last-seen global
     session_id = kwargs.get("session_id", "") or _current_session_id
+    if not session_id:
+        return "Error: no active session; cannot pin before a session starts"
     store = _ensure_store(session_id)
 
     unpin_id = str(args.get("unpin", "")).strip()
@@ -474,6 +487,8 @@ def _status_cmd(raw_args: str = "") -> str:
     """Handle /guard slash command — current integrity score and anchor status."""
     global _current_session_id
 
+    if not _current_session_id:
+        return "MemLock: no active session yet"
     store = _ensure_store(_current_session_id)
 
     score = store.integrity_score

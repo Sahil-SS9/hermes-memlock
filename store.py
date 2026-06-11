@@ -16,10 +16,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_STORE_DIR = Path(
-    os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")),
-    "memlock",
-)
+def _store_dir() -> Path:
+    # Resolved at call time so HERMES_HOME set after import (tests, embedding
+    # hosts) is honoured. `or` so an empty HERMES_HOME falls back too.
+    return Path(
+        os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
+        "memlock",
+    )
 
 
 def _safe_sid(session_id: str) -> str:
@@ -28,12 +31,12 @@ def _safe_sid(session_id: str) -> str:
 
 
 def _store_path(session_id: str) -> Path:
-    return _STORE_DIR / f"{_safe_sid(session_id)}.json"
+    return _store_dir() / f"{_safe_sid(session_id)}.json"
 
 
 def _atomic_write(path: Path, data: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
-    _STORE_DIR.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     tmp.rename(path)
 
@@ -56,8 +59,13 @@ def _blank() -> dict:
 class SessionStore:
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
-        self._path = _store_path(session_id)
         self._data: dict[str, Any] = self._load()
+
+    @property
+    def _path(self) -> Path:
+        # Recomputed per access so a HERMES_HOME change mid-process is
+        # honoured by long-lived instances, not just new ones.
+        return _store_path(self.session_id)
 
     # ── persistence ────────────────────────────────────────────────────
 
