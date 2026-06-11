@@ -17,7 +17,7 @@ def test_pin_and_rehydrate(plugin, memlock):
         {"role": "user", "content": "Tell me about X"},
     ]
 
-    summary_idx, body, _ = memlock.find_summary(history)
+    summary_idx, body = memlock.find_summary(history)
     assert summary_idx == 1
 
     active, _ = memlock.split_context(history, summary_idx)

@@ -57,14 +57,12 @@ def _message_text(msg: dict) -> str:
 
 def find_summary(
     conversation_history: list[dict],
-) -> tuple[int | None, str | None, int]:
+) -> tuple[int | None, str | None]:
     """Find the summary message in conversation_history.
 
-    Returns (idx, summary_body, split_point).
+    Returns (idx, summary_body).
       idx          — index of the summary message, or None if not found.
       summary_body — the text after the prefix, or None.
-      split_point  — index in history where the summary ends and active
-                     context begins (last protected turns).
 
     Scans from the front (system prompt is at idx 0, oldest messages next).
     The summary, if present, is typically near the front after system.
@@ -74,8 +72,8 @@ def find_summary(
         for prefix in _SUMMARY_PREFIXES:
             if text.startswith(prefix):
                 body = text[len(prefix):].strip()
-                return i, body, 0
-    return None, None, 0
+                return i, body
+    return None, None
 
 
 def hash_summary_body(body: str | None) -> str | None:
@@ -166,29 +164,78 @@ def audit_anchors(
     return alive, drifted
 
 
-# ── semantic path (P3, deferred) ────────────────────────────────────────
-# Module-level cache for sentence-transformers model.
+# ── semantic path ────────────────────────────────────────────────────────
+# Module-level cache for the sentence-transformers model, keyed by name so a
+# config change to embedding_model takes effect.  Tests monkeypatch
+# _semantic_model with a stub: any object with .encode(list[str]) ->
+# list[vector] works.
 _semantic_model: Any = None
+_semantic_model_name: str | None = None
+
+_WINDOW_OVERLAP_CHARS = 200
+# Hard cap per audit: embedding runs synchronously inside pre_llm_call, so a
+# pasted document must not translate into thousands of encode windows.
+_MAX_WINDOWS = 256
 
 
 def _ensure_semantic_model(model_name: str) -> Any | None:
     """Lazy-load sentence-transformers model.  Returns None on failure."""
-    global _semantic_model
-    if _semantic_model is not None:
+    global _semantic_model, _semantic_model_name
+    if _semantic_model is not None and _semantic_model_name in (None, model_name):
         return _semantic_model
     try:
         from sentence_transformers import SentenceTransformer
-        from sentence_transformers.util import cos_sim
 
         _semantic_model = SentenceTransformer(model_name)
+        _semantic_model_name = model_name
         return _semantic_model
     except Exception as exc:
         logger.warning(
-            "memlock: semantic model load failed: %s — falling back to keyword",
+            "memlock: semantic model load failed: %s; falling back to keyword",
             exc,
         )
-        _semantic_model = None
         return None
+
+
+def _build_windows(active_region: list[dict], window_chars: int) -> list[str]:
+    """Split the active region into embedding windows.
+
+    One window per message; messages longer than *window_chars* are split
+    into overlapping chunks so an anchor mention spanning a chunk edge is
+    still seen whole by at least one window.
+
+    window_chars is clamped above the overlap so the step stays positive,
+    and the total window count is capped keeping the most recent windows
+    (recency is what matters for "is the instruction still alive").
+    """
+    window_chars = max(window_chars, _WINDOW_OVERLAP_CHARS + 100)
+    windows: list[str] = []
+    step = window_chars - _WINDOW_OVERLAP_CHARS
+    for msg in active_region:
+        text = _message_text(msg).strip()
+        if not text:
+            continue
+        if len(text) <= window_chars:
+            windows.append(text)
+            continue
+        for start in range(0, len(text), step):
+            chunk = text[start:start + window_chars]
+            if chunk:
+                windows.append(chunk)
+            if start + window_chars >= len(text):
+                break
+    return windows[-_MAX_WINDOWS:]
+
+
+def _cosine(a, b) -> float:
+    """Cosine similarity over plain sequences.  Avoids importing
+    sentence_transformers.util so stub models need no dependency."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
 
 
 def semantic_audit_anchors(
@@ -196,10 +243,14 @@ def semantic_audit_anchors(
     active_region: list[dict],
     model_name: str = "all-MiniLM-L6-v2",
     sim_threshold: float = 0.65,
+    window_chars: int = 1000,
 ) -> tuple[list[str], list[str]]:
-    """Semantic probe: encode anchor text vs active region, cosine similarity.
+    """Semantic probe: an anchor is alive if its max cosine similarity over
+    the active-region windows reaches *sim_threshold*.
 
-    Fallback to keyword if model fails to load.
+    A single whole-region embedding would wash a short instruction out by
+    averaging; per-window max similarity is what makes the comparison mean
+    anything.  Falls back to keyword audit if the model is unavailable.
     """
     model = _ensure_semantic_model(model_name)
     if model is None:
@@ -207,25 +258,22 @@ def semantic_audit_anchors(
         return audit_anchors(anchors, active_region)
 
     try:
-        from sentence_transformers.util import cos_sim
+        windows = _build_windows(active_region, window_chars)
+        if not windows:
+            return [], [a["id"] for a in anchors]
 
-        active_text = "\n".join(
-            _message_text(msg) for msg in active_region
-        )
-        active_embedding = model.encode(active_text, convert_to_tensor=True)
+        window_embs = model.encode(windows)
+        anchor_texts = [a.get("text", "") for a in anchors]
+        anchor_embs = model.encode(anchor_texts)
 
         alive: list[str] = []
         drifted: list[str] = []
-
-        for anchor in anchors:
-            text = anchor.get("text", "")
-            emb = model.encode(text, convert_to_tensor=True)
-            sim = cos_sim(emb, active_embedding).item()
-            if sim >= sim_threshold:
+        for anchor, emb in zip(anchors, anchor_embs):
+            best = max(_cosine(emb, w) for w in window_embs)
+            if best >= sim_threshold:
                 alive.append(anchor["id"])
             else:
                 drifted.append(anchor["id"])
-
         return alive, drifted
     except Exception as exc:
         logger.warning("memlock: semantic audit failed: %s", exc)

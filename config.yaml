@@ -1,11 +1,14 @@
 # Defaults for memlock plugin.
 # Override in ~/.hermes/config.yaml under memlock: key.
 memlock:
-  detection: keyword              # keyword | semantic (P3)
+  detection: keyword              # keyword | semantic (needs sentence-transformers)
+  inject: on-drift                # on-drift | always (deterministic, every turn)
   drift_threshold: 0.5
   sim_threshold: 0.65
+  semantic_window_chars: 1000     # embedding window size for semantic audits
   max_slots: 8
   max_reminder_chars: 600
+  max_pins: 16                    # cap on guard_pin anchors per session
   hard_reinject_turns: 40
   alert_floor: 70
   alert_cooldown_s: 1800

@@ -4,7 +4,9 @@ Plugin for Hermes Agent.  Detects compaction events via SUMMARY_PREFIX scan,
 audits which pinned anchors survived in the active (non-summary) region,
 and rehydrates casualty reminders into the user turn.
 
-P1: keyword detection + rehydration.  Semantic path deferred to P3.
+Detection modes: keyword probes (default) or windowed semantic similarity
+(optional, needs sentence-transformers).  Injection modes: on-drift (default)
+or always.
 """
 from __future__ import annotations
 
@@ -96,7 +98,16 @@ def _merge_cfg(user_cfg: dict) -> dict:
 
 
 def _validate_anchors(anchors: list[dict]) -> list[dict]:
-    """Validate static anchors from config.  Drops any that fail validation."""
+    """Validate static anchors from config.  Drops any that fail validation.
+
+    Probe-less anchors cannot be audited individually, so they are only
+    accepted when they are the sole anchor defined.  The rule is applied
+    against the total config count, not insertion order, so the same set is
+    accepted or rejected identically regardless of ordering.
+    """
+    # Count only structurally valid anchors: a probe-less anchor that would
+    # end up the sole survivor after filtering must still be accepted.
+    total = sum(1 for a in anchors if a.get("id") and a.get("text"))
     valid: list[dict] = []
     for a in anchors:
         aid = a.get("id", "")
@@ -106,17 +117,17 @@ def _validate_anchors(anchors: list[dict]) -> list[dict]:
         if not aid or not text:
             logger.warning("memlock: skipping anchor missing id or text")
             continue
-        if len(probes) < 1:
+        if len(probes) < 1 and total > 1:
             logger.warning(
-                "memlock: anchor '%s' has <1 probe — may be inaccurate", aid,
-            )
-        # Reject probe-less anchors when total anchors >= 2.
-        if len(probes) < 1 and len(valid) >= 1:
-            logger.warning(
-                "memlock: anchor '%s' has 0 probes and there are already "
-                "%d anchors — rejecting to prevent ambiguous audits", aid, len(valid),
+                "memlock: anchor '%s' has 0 probes and %d anchors are "
+                "defined; rejecting to prevent ambiguous audits", aid, total,
             )
             continue
+        if len(probes) < 1:
+            logger.warning(
+                "memlock: anchor '%s' has no probes; audits treat it as "
+                "always alive", aid,
+            )
         valid.append({
             "id": aid,
             "text": text,
@@ -262,7 +273,7 @@ def _on_pre_llm(
         conversation_history = []
 
     # ── detect compaction ───────────────────────────────────────────
-    summary_idx, summary_body, _ = find_summary(conversation_history)
+    summary_idx, summary_body = find_summary(conversation_history)
     summary_hash = hash_summary_body(summary_body)
 
     compaction_event = store.is_new_compaction(summary_hash)
@@ -277,73 +288,83 @@ def _on_pre_llm(
         and (turn - store.last_reinject_turn) >= hard_reinject_turns
     )
 
-    if not compaction_event and not safety_net:
+    # 'always' injects every turn; 'on-drift' only audits and injects on
+    # compaction or the safety net.
+    inject_mode = str(_cfg.get("inject", "on-drift"))
+    should_audit = compaction_event or safety_net
+
+    if inject_mode != "always" and not should_audit:
         return None
 
-    # ── audit ───────────────────────────────────────────────────────
-    active_region, _ = split_context(conversation_history, summary_idx)
     anchors = store.sorted_anchors()
-
     if not anchors:
         return None
 
-    detection_mode = _cfg.get("detection", "keyword")
-    drift_threshold = float(_cfg.get("drift_threshold", 0.5))
+    # ── audit (drift state and /guard score; gating only in on-drift) ──
+    drifted_ids: list[str] = []
+    if should_audit:
+        active_region, _ = split_context(conversation_history, summary_idx)
+        detection_mode = _cfg.get("detection", "keyword")
+        drift_threshold = float(_cfg.get("drift_threshold", 0.5))
 
-    if detection_mode == "semantic":
-        sim_threshold = float(_cfg.get("sim_threshold", 0.65))
-        model_name = str(_cfg.get("embedding_model", "all-MiniLM-L6-v2"))
-        alive_ids, drifted_ids = semantic_audit_anchors(
-            anchors, active_region, model_name=model_name, sim_threshold=sim_threshold
-        )
-    else:
-        alive_ids, drifted_ids = audit_anchors(
-            anchors, active_region, drift_threshold=drift_threshold
-        )
+        if detection_mode == "semantic":
+            sim_threshold = float(_cfg.get("sim_threshold", 0.65))
+            model_name = str(_cfg.get("embedding_model", "all-MiniLM-L6-v2"))
+            window_chars = int(_cfg.get("semantic_window_chars", 1000))
+            alive_ids, drifted_ids = semantic_audit_anchors(
+                anchors, active_region, model_name=model_name,
+                sim_threshold=sim_threshold, window_chars=window_chars,
+            )
+        else:
+            alive_ids, drifted_ids = audit_anchors(
+                anchors, active_region, drift_threshold=drift_threshold
+            )
 
-    # Update anchor state
-    for aid in alive_ids:
-        store.mark_anchor_alive(aid, turn)
-    for did in drifted_ids:
-        store.mark_anchor_drifted(did)
+        for aid in alive_ids:
+            store.mark_anchor_alive(aid, turn)
+        for did in drifted_ids:
+            store.mark_anchor_drifted(did)
 
-    score = store.compute_integrity_score()
-    store.log_drift(drifted_ids, score)
+        score = store.compute_integrity_score()
+        store.log_drift(drifted_ids, score)
 
-    # ── alert ───────────────────────────────────────────────────────
-    alert_floor = int(_cfg.get("alert_floor", 70))
-    alert_cooldown = float(_cfg.get("alert_cooldown_s", 1800))
-    if score >= 0 and score < alert_floor and store.can_alert(alert_cooldown):
-        alert_msg = (
-            f"[memlock] integrity score {score}% "
-            f"(session {session_id})"
-        )
-        if drifted_ids:
-            alert_msg += f" — drifted: {', '.join(drifted_ids[:5])}"
-        logger.warning(alert_msg)
-        # Optional shell-out
-        script = _cfg.get("alert_script", "")
-        if script:
-            try:
-                import subprocess
+        # ── alert ───────────────────────────────────────────────────
+        alert_floor = int(_cfg.get("alert_floor", 70))
+        alert_cooldown = float(_cfg.get("alert_cooldown_s", 1800))
+        if score >= 0 and score < alert_floor and store.can_alert(alert_cooldown):
+            alert_msg = (
+                f"[memlock] integrity score {score}% "
+                f"(session {session_id})"
+            )
+            if drifted_ids:
+                alert_msg += f" — drifted: {', '.join(drifted_ids[:5])}"
+            logger.warning(alert_msg)
+            # Optional shell-out
+            script = _cfg.get("alert_script", "")
+            if script:
+                try:
+                    import subprocess
 
-                subprocess.Popen(
-                    [script, alert_msg],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception as exc:
-                logger.warning("memlock: alert script failed: %s", exc)
-        store.record_alert()
+                    subprocess.Popen(
+                        [script, alert_msg],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception as exc:
+                    logger.warning("memlock: alert script failed: %s", exc)
+            store.record_alert()
 
     # ── rehydrate ───────────────────────────────────────────────────
-    if not drifted_ids and not safety_net:
+    # Candidate selection; slot and char budgets in _select_casualties cut.
+    all_ids = [a["id"] for a in anchors]
+    if inject_mode == "always":
+        rehydrate_ids = all_ids
+    elif drifted_ids:
+        rehydrate_ids = drifted_ids
+    elif safety_net:
+        rehydrate_ids = all_ids
+    else:
         return None
-
-    # Safety net: rehydrate top-priority anchors regardless of drift.
-    rehydrate_ids = drifted_ids
-    if safety_net and not drifted_ids:
-        rehydrate_ids = [a["id"] for a in anchors[:2]]
 
     max_slots = int(_cfg.get("max_slots", 8))
     max_chars = int(_cfg.get("max_reminder_chars", 600))
@@ -441,11 +462,21 @@ def _pin_handler(args: dict | None = None, **kwargs) -> str:
 
 
 def _do_pin(store: SessionStore, args: dict) -> str:
-    text = str(args.get("text", "")).strip()
+    # Flatten whitespace: newlines in pinned text could otherwise spoof
+    # extra list items or a second marker line inside the reminder block.
+    text = re.sub(r"\s+", " ", str(args.get("text", ""))).strip()
     if not text:
         return "Error: 'text' is required for pin"
 
-    reminder = str(args.get("reminder", "")).strip()
+    max_pins = int(_cfg.get("max_pins", 16))
+    pinned_now = sum(1 for a in store.anchors().values() if a["pinned"])
+    if pinned_now >= max_pins:
+        return (
+            f"Error: pin limit reached ({max_pins}). "
+            f"Unpin something first (see /guard)."
+        )
+
+    reminder = re.sub(r"\s+", " ", str(args.get("reminder", ""))).strip()
     if not reminder:
         reminder = re.split(r"[.!?]\s+", text)[0][:120]
 
@@ -507,9 +538,9 @@ def _status_cmd(raw_args: str = "") -> str:
         lines.append("Anchors:")
         for a in anchors:
             status = "ALIVE" if not a["drifted"] else "DRIFTED"
-            pinned_marker = "📌" if a["pinned"] else "⚓"
+            kind = "[pin]" if a["pinned"] else "[static]"
             lines.append(
-                f"  {pinned_marker} [{status}] {a['id']} "
+                f"  {kind} [{status}] {a['id']} "
                 f"(p={a['priority']}) — {a.get('reminder', '')[:60]}"
             )
 

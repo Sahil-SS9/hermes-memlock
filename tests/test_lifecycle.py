@@ -35,7 +35,7 @@ def test_find_summary_detection():
         {"role": "assistant", "content": SUMMARY_PREFIX + " early turns"},
         {"role": "user", "content": "hello"},
     ]
-    idx, body, _ = find_summary(history)
+    idx, body = find_summary(history)
     assert idx == 1
     assert "early turns" in body
 
@@ -48,7 +48,7 @@ def test_split_context_excludes_summary():
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "world"},
     ]
-    idx, _, _ = find_summary(history)
+    idx, _ = find_summary(history)
     active, summary = split_context(history, idx)
     assert len(active) == 3  # system + 2 after summary
     assert len(summary) == 1
