@@ -1,3 +1,6 @@
+
+<img width="1254" height="1254" alt="ChatGPT Image Jun 11, 2026, 03_38_08 PM" src="https://github.com/user-attachments/assets/5aa4b31d-9730-4621-bffb-4e2ef1a7e09f" />
+
 # MemLock — Re-assert standing instructions after context compaction
 
 MemLock detects Hermes context compactions, audits which pinned instructions
