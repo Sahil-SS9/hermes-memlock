@@ -1,0 +1,26 @@
+# Defaults for memlock plugin.
+# Override in ~/.hermes/config.yaml under memlock: key.
+memlock:
+  detection: keyword              # keyword | semantic (P3)
+  drift_threshold: 0.5
+  sim_threshold: 0.65
+  max_slots: 8
+  max_reminder_chars: 600
+  hard_reinject_turns: 40
+  alert_floor: 70
+  alert_cooldown_s: 1800
+  alert_script: ""                # optional; empty = log only
+  embedding_model: all-MiniLM-L6-v2
+  anchors: []                     # static tier; survives without guard_pin
+  #
+  # Example — static anchors that survive every compaction:
+  # anchors:
+  #   - id: format-bullets
+  #     text: "Always reply in bullet points — never paragraphs"
+  #     priority: 80
+  #     probes: ["bullets", "paragraphs", "bullet points"]
+  #     pinned: true
+  #   - id: output-language
+  #     text: "All output must be in British English"
+  #     priority: 70
+  #     probes: ["British English", "colour", "favourite"]
