@@ -14,6 +14,7 @@ memlock:
   alert_cooldown_s: 1800
   alert_script: ""                # optional; empty = log only
   embedding_model: all-MiniLM-L6-v2
+  persistence_backend: file       # file | mnemosyne (deferred)
   anchors: []                     # static tier; survives without guard_pin
   #
   # Example — static anchors that survive every compaction:

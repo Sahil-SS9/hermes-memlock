@@ -197,7 +197,23 @@ Pin or unpin a standing instruction.
 | `priority` | No | 1-100 (default 50). Higher values get rehydrated first |
 | `reminder` | No | Short version for re-insertion (auto-trimmed) |
 | `probes` | No | Distinctive keywords for drift detection (auto-derived) |
+| `scope` | No | `session` (default, dies with session) or `global` (persists across sessions) |
 | `unpin` | For unpin | Anchor id to remove |
+
+### Cross-session persistence
+
+Pins with `scope: global` are saved to a durable store and automatically
+re-seeded on every new session. The default backend is a zero-dependency
+filesystem store (`~/.hermes/memlock/persist/`). The backend is pluggable:
+set `persistence_backend` in config to swap in Mnemosyne or other stores.
+
+```python
+# Pin a global instruction that survives session restarts:
+guard_pin(text="Always use British English", scope="global", priority=80)
+
+# Session-scoped pins (default) die with the session:
+guard_pin(text="For this PR review, use bullet points")
+```
 
 ## Limitations
 

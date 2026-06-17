@@ -27,6 +27,7 @@ try:
         split_context,
     )
     from .store import SessionStore
+    from .persistence import get_store as _get_durable_store
 except ImportError:
     # Loaded as a plain module (plugin loaders that exec the file, pytest)
     from detection import (  # type: ignore[no-redef]
@@ -37,6 +38,7 @@ except ImportError:
         split_context,
     )
     from store import SessionStore  # type: ignore[no-redef]
+    from persistence import get_store as _get_durable_store  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,7 @@ _stores: dict[str, SessionStore] = {}
 _session_turns: dict[str, int] = {}
 _current_session_id: str = ""
 _cfg: dict[str, Any] = {}
+_durable_store: Any = None  # lazy-init on first use
 
 # Stable marker for reminder blocks.  Phrasing rules:
 #  - declarative, innocuous, no urgency theatre
@@ -205,6 +208,15 @@ def _ensure_store(session_id: str) -> SessionStore:
     return _stores[session_id]
 
 
+def _get_durable() -> Any:
+    """Lazy-init the durable pin store from config."""
+    global _durable_store
+    if _durable_store is None:
+        backend = str(_cfg.get("persistence_backend", "file"))
+        _durable_store = _get_durable_store(backend)
+    return _durable_store
+
+
 # ── hooks ───────────────────────────────────────────────────────────────
 
 
@@ -230,6 +242,26 @@ def _on_start(session_id: str = "", **kwargs) -> None:
                     probes=a["probes"],
                     pinned=a.get("pinned", False),
                 )
+
+    # Seed global pins from durable store (cross-session persistence)
+    try:
+        durable = _get_durable()
+        global_pins = durable.load_pins()
+        for pin in global_pins:
+            if pin.get("scope") != "global":
+                continue
+            if pin["id"] in store.anchors():
+                continue
+            store.add_anchor(
+                anchor_id=pin["id"],
+                text=pin["text"],
+                reminder=pin.get("reminder", pin["text"][:120]),
+                priority=pin.get("priority", 50),
+                probes=pin.get("probes", []),
+                pinned=True,
+            )
+    except Exception as exc:
+        logger.warning("memlock: failed to seed global pins: %s", exc)
 
 
 def _on_end(session_id: str = "", **kwargs) -> None:
@@ -415,6 +447,11 @@ _PIN_SCHEMA = {
                 "items": {"type": "string"},
                 "description": "Distinctive keywords to check for survival (optional, auto-derived).",
             },
+            "scope": {
+                "type": "string",
+                "enum": ["session", "global"],
+                "description": "session = dies with session (default). global = persists across sessions via durable store.",
+            },
         },
         "required": [],
     },
@@ -486,6 +523,9 @@ def _do_pin(store: SessionStore, args: dict) -> str:
         probes = _derive_probes(text)
 
     anchor_id = f"pin_{int(time.time())}_{len(store.anchors())}"
+    scope = str(args.get("scope", "session")).strip().lower()
+    if scope not in ("session", "global"):
+        scope = "session"
 
     store.add_anchor(
         anchor_id=anchor_id,
@@ -496,17 +536,40 @@ def _do_pin(store: SessionStore, args: dict) -> str:
         pinned=True,
     )
 
+    # Persist global-scoped pins to durable store
+    if scope == "global":
+        try:
+            durable = _get_durable()
+            durable.save_pin({
+                "id": anchor_id,
+                "text": text,
+                "reminder": reminder,
+                "priority": priority,
+                "probes": [str(p) for p in probes],
+                "scope": "global",
+                "pinned_at": time.time(),
+            })
+        except Exception as exc:
+            logger.warning("memlock: failed to persist global pin: %s", exc)
+
+    scope_note = " (global — survives sessions)" if scope == "global" else ""
     return (
         f"Pinned instruction (id={anchor_id}, priority={priority}, "
-        f"probes={len(probes)}):\n  {text}\n"
+        f"probes={len(probes)}, scope={scope}{scope_note}):\n  {text}\n"
         f"Will survive context compaction."
     )
 
 
 def _do_unpin(store: SessionStore, anchor_id: str) -> str:
-    """Remove a pinned anchor by id."""
+    """Remove a pinned anchor by id. Also removes from durable store if present."""
     ok = store.unpin(anchor_id)
     if ok:
+        # Also remove from durable store (best-effort)
+        try:
+            durable = _get_durable()
+            durable.remove_pin(anchor_id)
+        except Exception as exc:
+            logger.warning("memlock: failed to remove durable pin: %s", exc)
         return f"Unpinned: {anchor_id}"
     return f"Error: anchor '{anchor_id}' not found or not pinned"
 
