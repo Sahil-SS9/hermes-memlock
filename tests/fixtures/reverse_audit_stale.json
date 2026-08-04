@@ -1,0 +1,80 @@
+{
+  "now": "2026-08-04T08:00:00Z",
+  "cases": [
+    {
+      "id": "contradicted-current-context",
+      "memories": [
+        {
+          "id": "pref-lang-old",
+          "content": "Use American English",
+          "source": "preference",
+          "timestamp": "2026-07-01T10:00:00Z",
+          "created_at": "2026-07-01T10:00:00Z",
+          "valid_until": null,
+          "superseded_by": null,
+          "scope": "global",
+          "metadata_json": {"memlock": {"preference_key": "response_language", "value": "American English", "probes": ["American English"], "material": true}},
+          "veracity": "stated",
+          "memory_type": "preference"
+        }
+      ],
+      "active_region": [
+        {"role": "user", "content": "Use British English from now on.", "metadata": {"memlock": {"preference_key": "response_language", "value": "British English"}}}
+      ],
+      "expected": {
+        "status": "ok",
+        "findings": [{"memory_ids": ["pref-lang-old"], "canonical_id": "pref-lang-old", "preference": "Use American English", "verdict": "CONTRADICTED", "material": true, "evidence": ["Use British English from now on."], "reason": "active user context sets response_language to British English", "action": "suppress"}],
+        "rehydrate_ids": [],
+        "suppressed_ids": ["pref-lang-old"],
+        "errors": []
+      }
+    },
+    {
+      "id": "still-valid-present",
+      "memories": [{"id": "pref-bullets", "content": "Use bullet points", "source": "preference", "timestamp": "2026-07-02T10:00:00Z", "created_at": "2026-07-02T10:00:00Z", "valid_until": null, "superseded_by": null, "scope": "global", "metadata_json": {"memlock": {"preference_key": "format", "value": "bullet points", "probes": ["bullet points"], "material": true}}, "veracity": "stated", "memory_type": "preference"}],
+      "active_region": [{"role": "system", "content": "Answer using bullet points."}],
+      "expected": {"status": "ok", "findings": [{"memory_ids": ["pref-bullets"], "canonical_id": "pref-bullets", "preference": "Use bullet points", "verdict": "PRESENT", "material": true, "evidence": ["bullet points"], "reason": "preference probes present in active context", "action": "none"}], "rehydrate_ids": [], "suppressed_ids": [], "errors": []}
+    },
+    {
+      "id": "no-relevant-evidence-material",
+      "memories": [{"id": "pref-concise", "content": "Keep responses concise", "source": "preference", "timestamp": "2026-07-03T10:00:00Z", "created_at": "2026-07-03T10:00:00Z", "valid_until": null, "superseded_by": null, "scope": "global", "metadata_json": {"memlock": {"preference_key": "response_length", "value": "concise", "probes": ["concise"], "material": true}}, "veracity": "stated", "memory_type": "preference"}],
+      "active_region": [{"role": "user", "content": "Explain the release."}],
+      "expected": {"status": "ok", "findings": [{"memory_ids": ["pref-concise"], "canonical_id": "pref-concise", "preference": "Keep responses concise", "verdict": "ABSENT", "material": true, "evidence": [], "reason": "no supporting or contradicting evidence in active context", "action": "rehydrate"}], "rehydrate_ids": ["pref-concise"], "suppressed_ids": [], "errors": []}
+    },
+    {
+      "id": "multiple-only-one-violation",
+      "memories": [
+        {"id": "pref-present", "content": "Use British English", "source": "preference", "timestamp": "2026-07-04T10:00:00Z", "created_at": "2026-07-04T10:00:00Z", "valid_until": null, "superseded_by": null, "scope": "global", "metadata_json": {"memlock": {"preference_key": "language", "value": "British English", "probes": ["British English"], "material": true}}, "veracity": "stated", "memory_type": "preference"},
+        {"id": "pref-missing", "content": "Do not use tables", "source": "preference", "timestamp": "2026-07-05T10:00:00Z", "created_at": "2026-07-05T10:00:00Z", "valid_until": null, "superseded_by": null, "scope": "global", "metadata_json": {"memlock": {"preference_key": "tables", "value": "disabled", "probes": ["do not use tables"], "material": true}}, "veracity": "stated", "memory_type": "preference"}
+      ],
+      "active_region": [{"role": "system", "content": "Write in British English."}],
+      "expected": {"status": "ok", "findings": [
+        {"memory_ids": ["pref-missing"], "canonical_id": "pref-missing", "preference": "Do not use tables", "verdict": "ABSENT", "material": true, "evidence": [], "reason": "no supporting or contradicting evidence in active context", "action": "rehydrate"},
+        {"memory_ids": ["pref-present"], "canonical_id": "pref-present", "preference": "Use British English", "verdict": "PRESENT", "material": true, "evidence": ["British English"], "reason": "preference probes present in active context", "action": "none"}
+      ], "rehydrate_ids": ["pref-missing"], "suppressed_ids": [], "errors": []}
+    },
+    {
+      "id": "duplicate-and-superseded",
+      "memories": [
+        {"id": "dup-old", "content": "Use short paragraphs", "source": "preference", "timestamp": "2026-07-01T10:00:00Z", "created_at": "2026-07-01T10:00:00Z", "valid_until": null, "superseded_by": null, "scope": "global", "metadata_json": {"memlock": {"preference_key": "paragraphs", "value": "short", "probes": ["short paragraphs"], "material": true}}, "veracity": "stated", "memory_type": "preference"},
+        {"id": "dup-new", "content": "Use short paragraphs", "source": "preference", "timestamp": "2026-07-10T10:00:00Z", "created_at": "2026-07-10T10:00:00Z", "valid_until": null, "superseded_by": null, "scope": "global", "metadata_json": {"memlock": {"preference_key": "paragraphs", "value": "short", "probes": ["short paragraphs"], "material": true}}, "veracity": "stated", "memory_type": "preference"},
+        {"id": "superseded", "content": "Use long paragraphs", "source": "preference", "timestamp": "2026-06-01T10:00:00Z", "created_at": "2026-06-01T10:00:00Z", "valid_until": null, "superseded_by": "dup-new", "scope": "global", "metadata_json": {"memlock": {"preference_key": "paragraphs", "value": "long", "probes": ["long paragraphs"], "material": true}}, "veracity": "stated", "memory_type": "preference"}
+      ],
+      "active_region": [{"role": "system", "content": "Use short paragraphs."}],
+      "expected": {"status": "ok", "findings": [
+        {"memory_ids": ["dup-new", "dup-old"], "canonical_id": "dup-new", "preference": "Use short paragraphs", "verdict": "PRESENT", "material": true, "evidence": ["short paragraphs"], "reason": "preference probes present in active context", "action": "none"},
+        {"memory_ids": ["superseded"], "canonical_id": "superseded", "preference": "Use long paragraphs", "verdict": "STORED_STALE", "material": true, "evidence": ["superseded_by=dup-new"], "reason": "stored preference is superseded", "action": "suppress"}
+      ], "rehydrate_ids": [], "suppressed_ids": ["superseded"], "errors": []}
+    },
+    {
+      "id": "empty-mnemosyne-response",
+      "memories": [],
+      "active_region": [{"role": "user", "content": "Hello"}],
+      "expected": {"status": "ok", "findings": [], "rehydrate_ids": [], "suppressed_ids": [], "errors": []}
+    }
+  ],
+  "query_failure": {
+    "exception": "mnemosyne unavailable",
+    "expected": {"status": "unavailable", "findings": [], "rehydrate_ids": [], "suppressed_ids": [], "errors": [{"code": "mnemosyne_query_failed", "message": "mnemosyne unavailable"}]}
+  }
+}
