@@ -19,6 +19,10 @@ from typing import Any, Protocol
 logger = logging.getLogger(__name__)
 
 
+class BackendUnavailableError(RuntimeError):
+    """Raised when a configured backend has no documented host adapter."""
+
+
 class DurableStore(Protocol):
     """Protocol for durable pin backends."""
 
@@ -99,20 +103,17 @@ def get_store(backend: str = "file", **kwargs: Any) -> DurableStore:
 
     Supported backends:
       - file (default): FileStore, zero-dependency
-      - mnemosyne: requires mnemosyne_remember/recall tools (deferred)
+      - mnemosyne: unavailable until the host supplies a documented adapter
 
     Unknown backends fall back to FileStore with a warning.
     """
     if backend == "file":
         return FileStore(**kwargs)
     if backend == "mnemosyne":
-        # Deferred — requires Hermes tool context at runtime.
-        # Placeholder: falls back to FileStore until wired.
-        logger.warning(
-            "memlock: mnemosyne persistence backend not yet implemented; "
-            "falling back to file store"
+        raise BackendUnavailableError(
+            "mnemosyne persistence requires a documented host adapter; "
+            "filesystem fallback would misrepresent the selected backend"
         )
-        return FileStore(**kwargs)
     logger.warning(
         "memlock: unknown persistence backend '%s'; falling back to file store",
         backend,

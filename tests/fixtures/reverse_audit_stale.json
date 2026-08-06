@@ -75,6 +75,6 @@
   ],
   "query_failure": {
     "exception": "mnemosyne unavailable",
-    "expected": {"status": "unavailable", "findings": [], "rehydrate_ids": [], "suppressed_ids": [], "errors": [{"code": "mnemosyne_query_failed", "message": "mnemosyne unavailable"}]}
+    "expected": {"status": "unavailable", "findings": [], "rehydrate_ids": [], "suppressed_ids": [], "errors": [{"code": "mnemosyne_query_failed", "reason": "mnemosyne unavailable"}]}
   }
 }

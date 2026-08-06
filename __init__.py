@@ -16,13 +16,16 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     from .detection import (
+        _derive_probes,
         audit_anchors,
         find_summary,
         hash_summary_body,
+        reverse_audit,
+        reverse_audit_unavailable,
         semantic_audit_anchors,
         split_context,
     )
@@ -31,9 +34,12 @@ try:
 except ImportError:
     # Loaded as a plain module (plugin loaders that exec the file, pytest)
     from detection import (  # type: ignore[no-redef]
+        _derive_probes,
         audit_anchors,
         find_summary,
         hash_summary_body,
+        reverse_audit,
+        reverse_audit_unavailable,
         semantic_audit_anchors,
         split_context,
     )
@@ -49,6 +55,7 @@ _session_turns: dict[str, int] = {}
 _current_session_id: str = ""
 _cfg: dict[str, Any] = {}
 _durable_store: Any = None  # lazy-init on first use
+_reverse_preference_provider: Callable[[str, int], list[dict]] | None = None
 
 # Stable marker for reminder blocks.  Phrasing rules:
 #  - declarative, innocuous, no urgency theatre
@@ -193,6 +200,53 @@ def _build_reminder_block(
     return "\n".join(lines)
 
 
+def set_reverse_preference_provider(
+    provider: Callable[[str, int], list[dict]] | None,
+) -> None:
+    """Register the host adapter that queries complete Mnemosyne preference rows."""
+    global _reverse_preference_provider
+    _reverse_preference_provider = provider
+
+
+def _run_reverse_audit(active_region: list[dict]) -> tuple[list[dict], dict]:
+    """Query the configured adapter and return budget-ready preference reminders."""
+    if not _cfg.get("reverse_audit", False) or _reverse_preference_provider is None:
+        return [], {"status": "ok", "findings": [], "rehydrate_ids": [], "suppressed_ids": [], "errors": []}
+    try:
+        rows = _reverse_preference_provider(
+            str(_cfg.get("reverse_preference_query", "applicable user preferences")),
+            int(_cfg.get("reverse_limit", 50)),
+        )
+        if not isinstance(rows, list):
+            raise TypeError("preference provider must return a list")
+        report = reverse_audit(
+            rows, active_region,
+            now=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            drift_threshold=float(_cfg.get("drift_threshold", 0.5)),
+        )
+    except Exception as exc:
+        logger.warning("memlock: reverse preference query unavailable")
+        return [], reverse_audit_unavailable(exc)
+    by_id = {f["canonical_id"]: f for f in report["findings"] if f["canonical_id"]}
+    candidates = []
+    for memory_id in report["rehydrate_ids"]:
+        finding = by_id[memory_id]
+        row = next((item for item in rows if item.get("id") == memory_id), {})
+        metadata = row.get("metadata_json", {})
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except (TypeError, ValueError):
+                metadata = {}
+        ml = metadata.get("memlock", {}) if isinstance(metadata, dict) else {}
+        candidates.append({
+            "id": memory_id, "text": finding["preference"],
+            "reminder": finding["preference"][:120],
+            "priority": int(ml.get("priority", 50)) if isinstance(ml, dict) else 50,
+        })
+    return candidates, report
+
+
 # ── per-session store access ────────────────────────────────────────────
 
 
@@ -329,17 +383,25 @@ def _on_pre_llm(
         return None
 
     anchors = store.sorted_anchors()
-    if not anchors:
-        return None
+    reverse_candidates: list[dict] = []
+    reverse_report: dict | None = None
 
     # ── audit (drift state and /guard score; gating only in on-drift) ──
+    alive_ids: list[str] = []
     drifted_ids: list[str] = []
     if should_audit:
         active_region, _ = split_context(conversation_history, summary_idx)
+        if user_message and not any(
+            str(msg.get("role", "")).lower() == "user"
+            and str(msg.get("content", "")) == user_message
+            for msg in active_region
+        ):
+            active_region.append({"role": "user", "content": user_message})
+        reverse_candidates, reverse_report = _run_reverse_audit(active_region)
         detection_mode = _cfg.get("detection", "keyword")
         drift_threshold = float(_cfg.get("drift_threshold", 0.5))
 
-        if detection_mode == "semantic":
+        if detection_mode == "semantic" and anchors:
             sim_threshold = float(_cfg.get("sim_threshold", 0.65))
             model_name = str(_cfg.get("embedding_model", "all-MiniLM-L6-v2"))
             window_chars = int(_cfg.get("semantic_window_chars", 1000))
@@ -347,7 +409,7 @@ def _on_pre_llm(
                 anchors, active_region, model_name=model_name,
                 sim_threshold=sim_threshold, window_chars=window_chars,
             )
-        else:
+        elif anchors:
             alive_ids, drifted_ids = audit_anchors(
                 anchors, active_region, drift_threshold=drift_threshold
             )
@@ -358,7 +420,19 @@ def _on_pre_llm(
             store.mark_anchor_drifted(did)
 
         score = store.compute_integrity_score()
-        store.log_drift(drifted_ids, score)
+        reverse_diagnostics = None
+        if reverse_report is not None:
+            reverse_diagnostics = {
+                "absent": [f["canonical_id"] for f in reverse_report["findings"]
+                           if f["verdict"] == "ABSENT" and f["canonical_id"]],
+                "contradicted": [mid for f in reverse_report["findings"]
+                                 if f["verdict"] == "CONTRADICTED" for mid in f["memory_ids"]],
+                "stale": [mid for f in reverse_report["findings"]
+                          if f["verdict"] == "STORED_STALE" for mid in f["memory_ids"]],
+                "unknown": [mid for f in reverse_report["findings"]
+                            if f["verdict"] == "UNKNOWN" for mid in f["memory_ids"]],
+            }
+        store.log_drift(drifted_ids, score, reverse=reverse_diagnostics)
 
         # ── alert ───────────────────────────────────────────────────
         alert_floor = int(_cfg.get("alert_floor", 70))
@@ -389,13 +463,14 @@ def _on_pre_llm(
     # ── rehydrate ───────────────────────────────────────────────────
     # Candidate selection; slot and char budgets in _select_casualties cut.
     all_ids = [a["id"] for a in anchors]
+    rehydrate_ids: list[str] = []
     if inject_mode == "always":
         rehydrate_ids = all_ids
     elif drifted_ids:
         rehydrate_ids = drifted_ids
     elif safety_net:
         rehydrate_ids = all_ids
-    else:
+    elif not reverse_candidates:
         return None
 
     max_slots = int(_cfg.get("max_slots", 8))
@@ -403,6 +478,14 @@ def _on_pre_llm(
     selected, remaining = _select_casualties(
         store, rehydrate_ids, max_slots, max_chars
     )
+    total_chars = sum(len(item.get("reminder", "")[:120]) + 4 for item in selected)
+    for candidate in sorted(reverse_candidates, key=lambda item: (-item["priority"], item["id"])):
+        reminder_chars = len(candidate["reminder"][:120]) + 4
+        if len(selected) >= max_slots or total_chars + reminder_chars > max_chars:
+            remaining.append(candidate["id"])
+            continue
+        selected.append(candidate)
+        total_chars += reminder_chars
 
     reminder_block = _build_reminder_block(selected, remaining)
     if reminder_block is None:
@@ -456,24 +539,6 @@ _PIN_SCHEMA = {
         "required": [],
     },
 }
-
-
-def _derive_probes(text: str) -> list[str]:
-    """Auto-derive probes from text using distinctive tokens."""
-    common = {
-        "that", "this", "from", "with", "your", "will", "when",
-        "they", "have", "been", "were", "their", "about", "would",
-        "which", "there", "should", "could", "these", "those",
-    }
-    tokens = re.findall(r"\b[a-zA-Z]{4,}\b", text.lower())
-    distinctive = [t for t in tokens if t not in common]
-    seen: set[str] = set()
-    probes: list[str] = []
-    for t in distinctive:
-        if t not in seen:
-            seen.add(t)
-            probes.append(t)
-    return probes[:5]
 
 
 def _pin_handler(args: dict | None = None, **kwargs) -> str:

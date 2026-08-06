@@ -177,9 +177,16 @@ probes. Note the model downloads lazily on first semantic audit.
 | `alert_cooldown_s` | `1800` | Min seconds between alerts (prevents spam) |
 | `alert_script` | `""` | Optional script invoked with the alert message |
 | `embedding_model` | `all-MiniLM-L6-v2` | Sentence-transformer for semantic mode |
+| `reverse_audit` | `false` | Query stored preferences after compaction (needs host adapter) |
+| `reverse_preference_query` | `applicable user preferences` | Query string passed to the preference provider |
+| `reverse_limit` | `50` | Max preference rows retrieved per audit |
 | `anchors` | `[]` | Static anchors seeded from config |
 
 ---
+
+See `docs/REVERSE_AUDIT.md` for the reverse-audit developer guide: usage,
+report interpretation, Mnemosyne failure behaviour, and the forward-vs-reverse
+distinction.
 
 ## Slash Commands
 

@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 
+import pytest
 import persistence
 
 
@@ -77,10 +78,10 @@ def test_get_store_unknown_falls_back():
     assert isinstance(store, persistence.FileStore)
 
 
-def test_get_store_mnemosyne_falls_back():
-    """Mnemosyne backend (deferred) falls back to FileStore."""
-    store = persistence.get_store("mnemosyne")
-    assert isinstance(store, persistence.FileStore)
+def test_get_store_mnemosyne_is_explicitly_unavailable():
+    """Mnemosyne must not masquerade as filesystem persistence."""
+    with pytest.raises(persistence.BackendUnavailableError, match="documented host adapter"):
+        persistence.get_store("mnemosyne")
 
 
 def test_persist_dir_honours_hermes_home(monkeypatch, tmp_path):

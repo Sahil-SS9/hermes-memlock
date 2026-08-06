@@ -28,6 +28,15 @@ def test_integrity_score():
     assert s.compute_integrity_score() == 50
 
 
+def test_drift_log_accepts_optional_reverse_audit_diagnostics():
+    s = store_mod.SessionStore("reverse-log")
+    s.log_drift([], -1, reverse={"absent": ["p1"], "contradicted": ["p2"], "stale": [], "unknown": ["p3"]})
+    entry = s._data["drift_log"][-1]
+    assert entry["reverse"] == {
+        "absent": ["p1"], "contradicted": ["p2"], "stale": [], "unknown": ["p3"]
+    }
+
+
 def test_find_summary_detection():
     """SUMMARY_PREFIX detection."""
     history = [

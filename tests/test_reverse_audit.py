@@ -66,7 +66,7 @@ def _query_boundary(
             "rehydrate_ids": [],
             "suppressed_ids": [],
             "errors": [
-                {"code": "mnemosyne_query_failed", "message": str(exc)}
+                {"code": "mnemosyne_query_failed", "reason": str(exc)}
             ],
         }
     return detection.reverse_audit(memories, active_region, now=now)

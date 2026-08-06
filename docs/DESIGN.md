@@ -32,13 +32,21 @@ rehydrate drifted anchors as a structured reminder block.
    store file. No cross-session drift.
 4. **Fail-open.** The Hermes hook runner swallows hook exceptions, so a
    failure in MemLock means the turn continues without rehydration. Pins
-   survive in the store for the next turn.
+   survive in the store for the next turn. The reverse preference query is
+   likewise fail-open: provider failure returns `status="unavailable"` and
+   the turn continues unchanged.
 5. **Bounded state.** Drift log is capped at 20 events and pins at
    `max_pins` per session. Store files are created on demand; they are
    small JSON files and persist until removed by the operator.
 6. **Two anchor sources, one audit.** Static anchors come from config and
    reseed on every session start; dynamic pins come from `guard_pin`.
    Both go through the identical probe audit and rehydration path.
+7. **Two audit directions, one budget.** The forward audit starts from
+   configured anchors and asks "did they survive?"; the reverse audit
+   starts from every stored preference and asks "is it still supported?"
+   Reverse `ABSENT + material` rehydration candidates flow into the same
+   priority/slot/character budget as forward casualties, so enabling
+   reverse audit cannot blow the reminder block size.
 
 ## Probe-based detection rationale
 

@@ -14,7 +14,10 @@ memlock:
   alert_cooldown_s: 1800
   alert_script: ""                # optional; empty = log only
   embedding_model: all-MiniLM-L6-v2
-  persistence_backend: file       # file | mnemosyne (deferred)
+  persistence_backend: file       # mnemosyne is unavailable without a host adapter
+  reverse_audit: false             # query stored preferences after compaction
+  reverse_preference_query: "applicable user preferences"
+  reverse_limit: 50
   anchors: []                     # static tier; survives without guard_pin
   #
   # Example — static anchors that survive every compaction:

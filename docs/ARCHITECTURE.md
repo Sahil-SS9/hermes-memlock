@@ -26,6 +26,11 @@ flowchart TD
     P -->|No| R
     R --> S[Build reminder block]
     S --> T[Return context dict → appended to user turn]
+
+    K -.->|if reverse_audit enabled| R1[Query preference provider]
+    R1 --> R2[reverse_audit: classify each stored preference]
+    R2 --> R3[merge ABSENT+material rehydrate_ids into casualty selection]
+    R3 --> R
 ```
 
 ### Storage layout
@@ -85,6 +90,13 @@ Per-session state:
    and `max_reminder_chars` budgets.
 6. **Alert cooldown.** Integrity alerts are rate-limited to one per 1800s
    to prevent log noise when the model is mid-task.
+7. **Reverse audit (state-to-context).** After a compaction, stored
+   preferences are also queried (when configured with a host adapter) and
+   classified by `reverse_audit()`. `ABSENT + material` preferences merge
+   into the same rehydration budgets; stale/contradicted/ambiguous rows are
+   excluded and never auto-reinjected. This closes the forward-only blind
+   spot where preferences that were never configured as anchors were
+   invisible to the audit. See `docs/REVERSE_AUDIT.md`.
 
 ### Optional dispatch patch
 

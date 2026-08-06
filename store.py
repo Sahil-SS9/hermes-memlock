@@ -182,12 +182,17 @@ class SessionStore:
         self._data["integrity_score"] = score
         return score
 
-    def log_drift(self, casualties: list[str], score: int) -> None:
-        self._data["drift_log"].append({
+    def log_drift(
+        self, casualties: list[str], score: int, *, reverse: dict | None = None,
+    ) -> None:
+        entry = {
             "time": time.time(),
             "score": score,
             "casualties": casualties,
-        })
+        }
+        if reverse is not None:
+            entry["reverse"] = reverse
+        self._data["drift_log"].append(entry)
         # keep last 20 drift events
         self._data["drift_log"] = self._data["drift_log"][-20:]
 
