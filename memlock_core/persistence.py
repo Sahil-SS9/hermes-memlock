@@ -35,12 +35,16 @@ class DurableStore(Protocol):
 
 
 def _persist_dir() -> Path:
-    """Resolved at call time so HERMES_HOME changes are honoured."""
-    return Path(
-        os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
-        "memlock",
-        "persist",
-    )
+    """Resolved at call time so host-home env changes are honoured.
+
+    Env contract mirrors memlock_core.store: HERMES_HOME (host-provided) or
+    MEMLOCK_HOME, else the harness-neutral default under the user's home.
+    """
+    for var in ("HERMES_HOME", "MEMLOCK_HOME"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            return Path(val, "memlock", "persist")
+    return Path(os.path.join(os.path.expanduser("~"), ".memlock"), "memlock", "persist")
 
 
 class FileStore:

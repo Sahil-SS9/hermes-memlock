@@ -1,5 +1,5 @@
 """Tests for MemLock: windowed semantic audit (stub model, no downloads)."""
-import detection
+import memlock_core.detection as detection
 
 
 class StubModel:

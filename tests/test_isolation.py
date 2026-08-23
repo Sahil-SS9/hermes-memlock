@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-import store as store_mod
+import memlock_core.store as store_mod_pkg
 
 _PDIR = Path(__file__).resolve().parent.parent
 
@@ -14,14 +14,14 @@ def test_store_dir_resolved_at_call_time(monkeypatch, tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"
     monkeypatch.setenv("HERMES_HOME", str(first))
-    assert store_mod._store_dir() == first / "memlock"
+    assert store_mod_pkg._store_dir() == first / "memlock"
     monkeypatch.setenv("HERMES_HOME", str(second))
-    assert store_mod._store_dir() == second / "memlock"
+    assert store_mod_pkg._store_dir() == second / "memlock"
 
 
 def test_store_writes_under_tmp_only(isolated_hermes_home, tmp_path):
     """A saved store lands under the isolated home, nowhere else."""
-    s = store_mod.SessionStore("iso-check")
+    s = store_mod_pkg.SessionStore("iso-check")
     s.add_anchor("a1", "text", "t", priority=50, probes=["text"], pinned=True)
     expected = isolated_hermes_home / "memlock" / "iso-check.json"
     assert expected.exists()
@@ -29,14 +29,22 @@ def test_store_writes_under_tmp_only(isolated_hermes_home, tmp_path):
     assert not real.exists()
 
 
-def test_import_works_as_plain_module():
-    """__init__.py loads without a package context (absolute-import fallback)."""
+def test_core_import_works_as_plain_module():
+    """memlock_core loads without any package context (absolute-import path)."""
     spec = importlib.util.spec_from_file_location(
-        "memlock_plain_check", _PDIR / "__init__.py",
+        "memlock_core_plain_check", _PDIR / "memlock_core" / "__init__.py",
+        submodule_search_locations=[str(_PDIR / "memlock_core")],
     )
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    assert hasattr(mod, "register")
+    # memlock_core/__init__ uses relative imports (from .detection import ...),
+    # which only resolve when the package is registered in sys.modules BEFORE
+    # exec_module runs — otherwise Python cannot map '.' to a parent.
+    sys.modules["memlock_core_plain_check"] = mod
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.modules.pop("memlock_core_plain_check", None)
+    assert hasattr(mod, "MemlockService")
 
 
 def test_import_works_as_package():
@@ -116,7 +124,9 @@ def test_compaction_in_one_session_does_not_touch_the_other(
     memlock, fake_ctx_cls, base_cfg,
 ):
     """Drift/rehydration in beta leaves alpha's anchor state untouched."""
-    from detection import SUMMARY_PREFIX
+    from memlock_core.detection import DEFAULT_SUMMARY_PREFIXES
+
+    SUMMARY_PREFIX = DEFAULT_SUMMARY_PREFIXES[0]
 
     _two_sessions(memlock, fake_ctx_cls, base_cfg)
     _pin(memlock, {"text": "Alpha rule about bullet points", "priority": 80},
@@ -209,7 +219,9 @@ def test_sessions_do_not_share_turn_counters_or_reinject_state(
 ):
     """Turn accounting is per-session: driving beta to its safety net does
     not push alpha over hard_reinject_turns."""
-    from detection import SUMMARY_PREFIX
+    from memlock_core.detection import DEFAULT_SUMMARY_PREFIXES
+
+    SUMMARY_PREFIX = DEFAULT_SUMMARY_PREFIXES[0]
 
     _two_sessions(memlock, fake_ctx_cls, base_cfg)
     _pin(memlock, {"text": "Alpha rule with distinctive zephyr probes",

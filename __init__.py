@@ -1,8 +1,13 @@
 """MemLock — Re-assert standing instructions after context compaction.
 
-Plugin for Hermes Agent.  Detects compaction events via SUMMARY_PREFIX scan,
-audits which pinned anchors survived in the active (non-summary) region,
-and rehydrates casualty reminders into the user turn.
+Hermes Agent plugin shim.  The engine lives in memlock_core/ (harness
+agnostic); this module adapts it to the Hermes plugin contract:
+
+  - ``pre_llm_call`` hook → core compaction detection + anchor audit +
+    casualty rehydration into the user turn.
+  - ``guard_pin`` tool / ``/guard`` command → core pin lifecycle and status.
+  - Config arrives from PluginContext or $HERMES_HOME/config.yaml; the
+    Hermes compaction markers stay at their core defaults.
 
 Detection modes: keyword probes (default) or windowed semantic similarity
 (optional, needs sentence-transformers).  Injection modes: on-drift (default)
@@ -10,75 +15,83 @@ or always.
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
-import time
 from pathlib import Path
-from typing import Any, Callable
 
+# The engine is harness-agnostic and imports nothing Hermes-shaped. Loaded as
+# a package (normal plugin install) we use relative imports; loaded as a plain
+# module (plugin loaders that exec the file, pytest) the repo root is on
+# sys.path and flat imports work.
 try:
-    from .detection import (
-        _derive_probes,
-        audit_anchors,
-        find_summary,
-        hash_summary_body,
-        reverse_audit,
-        reverse_audit_unavailable,
-        semantic_audit_anchors,
-        split_context,
-    )
-    from .store import SessionStore
-    from .persistence import get_store as _get_durable_store
-except ImportError:
-    # Loaded as a plain module (plugin loaders that exec the file, pytest)
-    from detection import (  # type: ignore[no-redef]
-        _derive_probes,
-        audit_anchors,
-        find_summary,
-        hash_summary_body,
-        reverse_audit,
-        reverse_audit_unavailable,
-        semantic_audit_anchors,
-        split_context,
-    )
-    from store import SessionStore  # type: ignore[no-redef]
-    from persistence import get_store as _get_durable_store  # type: ignore[no-redef]
-
-try:
-    import memlock_adapters as _adapters_pkg
-except ImportError:
-    # Plain-module load: repo root is on sys.path in that mode.
-    try:
-        import memlock_adapters as _adapters_pkg  # type: ignore[no-redef]
-    except ImportError:
-        _adapters_pkg = None  # type: ignore[assignment]
+    from .memlock_core import MemlockService, load_config_file
+    from .memlock_core import REMINDER_MARKER
+except ImportError:  # plain-module load
+    from memlock_core import MemlockService, load_config_file  # type: ignore[no-redef]
+    from memlock_core import REMINDER_MARKER  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
-# Per-session stores keyed by session_id.  No cross-session leakage.
-# Tool handler binds to _current_session_id (last-seen session), documented race.
-_stores: dict[str, SessionStore] = {}
-_session_turns: dict[str, int] = {}
-_current_session_id: str = ""
-_cfg: dict[str, Any] = {}
-_durable_store: Any = None  # lazy-init on first use
-_reverse_preference_provider: Callable[[str, int], list[dict]] | None = None
-
-# _UNSET distinguishes "config adapter not resolved yet" from "resolved and
-# disabled (None)" so the lazy load runs exactly once per config generation.
-_UNSET = object()
-_preference_adapter: Any = _UNSET
-
-# Stable marker for reminder blocks.  Phrasing rules:
-#  - declarative, innocuous, no urgency theatre
-#  - no self-concealing language
-#  - stable wording for cache-friendliness
-REMINDER_MARKER = "[Standing instructions — still active]"
-
 _CWD = Path(__file__).resolve().parent
 _LOCAL_CFG = _CWD / "config.yaml"
+
+# Back-compat re-exports (tests and third-party code import these names).
+__version__ = "0.4.0"
+
+_service = MemlockService()
+
+# Detection helpers used to live at plugin level; keep them importable.
+try:
+    from .memlock_core.detection import (  # noqa: F401
+        DEFAULT_SUMMARY_PREFIXES,
+        audit_anchors,
+        find_summary,
+        hash_summary_body,
+        split_context,
+    )
+except ImportError:  # plain-module load
+    from memlock_core.detection import (  # type: ignore[no-redef]  # noqa: F401
+        DEFAULT_SUMMARY_PREFIXES,
+        audit_anchors,
+        find_summary,
+        hash_summary_body,
+        split_context,
+    )
+
+# Back-compat aliases onto the service's state, so pre-extraction callers
+# (and older tests) can read/patch the old module-level names. These are
+# properties on the module via __getattr__ below.
+_MODULE_STATE_ALIASES = {
+    "_stores": "stores",
+    "_session_turns": "session_turns",
+}
+
+
+def __getattr__(name: str):
+    """Back-compat accessors for the pre-extraction module globals.
+
+    ``_stores`` / ``_session_turns`` / ``_current_session_id`` / ``_cfg`` /
+    ``_durable_store`` now live on the service instance; they are exposed
+    here by reference so tests and host code that patch them keep working.
+    """
+    if name in _MODULE_STATE_ALIASES:
+        return getattr(_service, _MODULE_STATE_ALIASES[name])
+    if name == "_current_session_id":
+        return _service.current_session_id
+    if name == "_cfg":
+        return _service._cfg
+    if name == "_durable_store":
+        return _service.durable_store
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+# Public surface used by tests/host code. Kept as module attributes so the
+# shim reads exactly like the pre-extraction plugin did.
+PIN_SCHEMA_PROPERTIES = ("text", "unpin", "pin_id", "reminder", "priority", "probes", "scope")
+
+
+def _service_for(session_id: str = "") -> MemlockService:
+    """Return the process-wide service (single-plugin-host convenience)."""
+    return _service
 
 
 # ── config ──────────────────────────────────────────────────────────────
@@ -93,306 +106,79 @@ def _safe_cfg(ctx) -> dict:
     except Exception:
         pass
     try:
-        import yaml
-
         hp = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
         cf = hp / "config.yaml"
         if cf.exists():
-            raw = yaml.safe_load(cf.read_text())
-            return dict(raw.get("memlock", {}))
+            return load_config_file(cf)
     except Exception:
         pass
     return {}
 
 
 def _load_defaults() -> dict:
+    """Repo-local config.yaml defaults (best-effort, fail-open)."""
     try:
-        import yaml
-
-        raw = yaml.safe_load(_LOCAL_CFG.read_text())
-        return dict(raw.get("memlock", {}))
+        return load_config_file(_LOCAL_CFG)
     except Exception:
         return {}
 
 
 def _merge_cfg(user_cfg: dict) -> dict:
-    defaults = _load_defaults()
-    defaults.update(user_cfg)
-    return defaults
+    return _service.merge_cfg({**_load_defaults(), **(user_cfg or {})})
 
 
-def _validate_anchors(anchors: list[dict]) -> list[dict]:
-    """Validate static anchors from config.  Drops any that fail validation.
-
-    Probe-less anchors cannot be audited individually, so they are only
-    accepted when they are the sole anchor defined.  The rule is applied
-    against the total config count, not insertion order, so the same set is
-    accepted or rejected identically regardless of ordering.
-    """
-    # Count only structurally valid anchors: a probe-less anchor that would
-    # end up the sole survivor after filtering must still be accepted.
-    total = sum(1 for a in anchors if a.get("id") and a.get("text"))
-    valid: list[dict] = []
-    for a in anchors:
-        aid = a.get("id", "")
-        text = a.get("text", "")
-        reminder = a.get("reminder", text[:120])
-        probes = a.get("probes", [])
-        if not aid or not text:
-            logger.warning("memlock: skipping anchor missing id or text")
-            continue
-        if len(probes) < 1 and total > 1:
-            logger.warning(
-                "memlock: anchor '%s' has 0 probes and %d anchors are "
-                "defined; rejecting to prevent ambiguous audits", aid, total,
-            )
-            continue
-        if len(probes) < 1:
-            logger.warning(
-                "memlock: anchor '%s' has no probes; audits treat it as "
-                "always alive", aid,
-            )
-        valid.append({
-            "id": aid,
-            "text": text,
-            "reminder": reminder or text[:120],
-            "priority": int(a.get("priority", 50)),
-            "probes": [str(p) for p in probes],
-            "pinned": bool(a.get("pinned", False)),
-        })
-    return valid
+def _validate_anchors(anchors):
+    """Back-compat delegate to the service method."""
+    return _service.validate_anchors(anchors)
 
 
-# ── rehydration ─────────────────────────────────────────────────────────
+# ── back-compat delegates (pre-extraction public surface) ───────────────
 
 
-def _select_casualties(
-    store: SessionStore,
-    anchored_ids: list[str],
-    max_slots: int,
-    max_chars: int,
-) -> tuple[list[dict], list[str]]:
-    """Select drifted anchors for rehydration, packed by priority→id alpha.
-
-    Returns (selected_anchors, remaining_casualty_ids).
-    """
-    all_anchors = store.sorted_anchors()
-    casualties = [a for a in all_anchors if a["id"] in anchored_ids]
-    selected: list[dict] = []
-    total_chars = 0
-
-    for anchor in casualties:
-        if len(selected) >= max_slots:
-            break
-        reminder_text = anchor.get("reminder", anchor.get("text", "")[:120])
-        new_chars = len(reminder_text) + 4  # "  - \n"
-        if total_chars + new_chars > max_chars:
-            continue
-        selected.append(anchor)
-        total_chars += new_chars
-
-    remaining = [a["id"] for a in casualties if a not in selected]
-    return selected, remaining
+def _select_casualties(store, anchored_ids, max_slots, max_chars):
+    return _service.select_casualties(store, anchored_ids, max_slots, max_chars)
 
 
-def _build_reminder_block(
-    selected: list[dict],
-    remaining: list[str],
-) -> str | None:
-    """Build the reminder injection string.  Returns None if nothing to inject."""
-    if not selected:
-        return None
-    lines = [REMINDER_MARKER]
-    for a in selected:
-        reminder = a.get("reminder", a.get("text", ""))[:120]
-        lines.append(f"  - {reminder}")
-    if remaining:
-        lines.append(
-            f"  - ({len(remaining)} additional instruction(s) not shown — "
-            f"the user can run /guard to see the full list)"
-        )
-    return "\n".join(lines)
+def _build_reminder_block(selected, remaining):
+    return _service.build_reminder_block(selected, remaining)
 
 
-def set_reverse_preference_provider(
-    provider: Callable[[str, int], list[dict]] | None,
-) -> None:
-    """Register the host adapter that queries complete Mnemosyne preference rows.
-
-    Explicitly-registered providers take precedence over config-selected
-    adapters (``preference_adapter``) for the lifetime of the process.
-    """
-    global _reverse_preference_provider
-    _reverse_preference_provider = provider
-
-
-def _resolve_preference_provider() -> Callable[[str, int], list[dict]] | None:
-    """Pick the preference provider: explicit registration > config adapter.
-
-    The config-selected adapter is loaded LAZILY at first audit (module-level
-    cache, same pattern as _get_durable) so importing the plugin never pulls
-    a provider dependency. Unknown adapter names disable the reverse pass
-    with a warning — fail-open, never an error.
-    """
-    global _preference_adapter
-    if _reverse_preference_provider is not None:
-        return _reverse_preference_provider
-    if _preference_adapter is not _UNSET:
-        return _preference_adapter
-
-    name = str(_cfg.get("preference_adapter", "") or "").strip()
-    if not name or not _cfg.get("reverse_audit", False):
-        _preference_adapter = None
-        return None
-    if _adapters_pkg is None:
-        logger.warning(
-            "memlock: memlock_adapters package unavailable; "
-            "adapter '%s' disabled", name,
-        )
-        _preference_adapter = None
-        return None
-    try:
-        _preference_adapter = _adapters_pkg.get_provider(name)
-    except Exception as exc:
-        logger.warning(
-            "memlock: adapter '%s' failed to load: %s; reverse audit disabled",
-            name, exc,
-        )
-        _preference_adapter = None
-    return _preference_adapter
+def set_reverse_preference_provider(provider) -> None:
+    """Register a host preference source (takes precedence over adapters)."""
+    _service.set_preference_provider(provider)
 
 
 def _reset_preference_adapter_cache() -> None:
-    """Test/config-reload hook: force re-resolution on the next audit."""
-    global _preference_adapter
-    _preference_adapter = _UNSET
+    """Test/config-reload hook: force adapter re-resolution on next audit."""
+    _service.reset_preference_adapter_cache()
 
 
-def _run_reverse_audit(active_region: list[dict]) -> tuple[list[dict], dict]:
-    """Query the configured adapter and return budget-ready preference reminders."""
-    provider = _resolve_preference_provider()
-    if not _cfg.get("reverse_audit", False) or provider is None:
-        return [], {"status": "ok", "findings": [], "rehydrate_ids": [], "suppressed_ids": [], "errors": []}
-    try:
-        rows = provider(
-            str(_cfg.get("reverse_preference_query", "applicable user preferences")),
-            int(_cfg.get("reverse_limit", 50)),
-        )
-        if not isinstance(rows, list):
-            raise TypeError("preference provider must return a list")
-        report = reverse_audit(
-            rows, active_region,
-            now=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            drift_threshold=float(_cfg.get("drift_threshold", 0.5)),
-        )
-    except Exception as exc:
-        logger.warning("memlock: reverse preference query unavailable")
-        return [], reverse_audit_unavailable(exc)
-    by_id = {f["canonical_id"]: f for f in report["findings"] if f["canonical_id"]}
-    candidates = []
-    for memory_id in report["rehydrate_ids"]:
-        finding = by_id[memory_id]
-        row = next((item for item in rows if item.get("id") == memory_id), {})
-        metadata = row.get("metadata_json", {})
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except (TypeError, ValueError):
-                metadata = {}
-        ml = metadata.get("memlock", {}) if isinstance(metadata, dict) else {}
-        candidates.append({
-            "id": memory_id, "text": finding["preference"],
-            "reminder": finding["preference"][:120],
-            "priority": int(ml.get("priority", 50)) if isinstance(ml, dict) else 50,
-        })
-    return candidates, report
+def _get_store(session_id: str):
+    return _service.get_store(session_id)
 
 
-# ── per-session store access ────────────────────────────────────────────
+def _ensure_store(session_id: str):
+    return _service.ensure_store(session_id)
 
 
-def _get_store(session_id: str) -> SessionStore | None:
-    """Return the SessionStore for this session_id, or None if not initialised."""
-    return _stores.get(session_id)
+def _get_durable():
+    return _service.get_durable()
 
 
-def _ensure_store(session_id: str) -> SessionStore:
-    """Return or create the SessionStore for this session_id."""
-    if session_id not in _stores:
-        _stores[session_id] = SessionStore(session_id)
-    return _stores[session_id]
-
-
-def _get_durable() -> Any:
-    """Lazy-init the durable pin store from config."""
-    global _durable_store
-    if _durable_store is None:
-        backend = str(_cfg.get("persistence_backend", "file"))
-        _durable_store = _get_durable_store(backend)
-    return _durable_store
+def get_service() -> MemlockService:
+    """The service instance this shim drives (single-service hosts)."""
+    return _service
 
 
 # ── hooks ───────────────────────────────────────────────────────────────
 
 
 def _on_start(session_id: str = "", **kwargs) -> None:
-    global _current_session_id
-    if not session_id:
-        return
-    _current_session_id = session_id
-    store = _ensure_store(session_id)
-    _session_turns[session_id] = 0
-
-    # Seed static anchors from config
-    static_anchors = _cfg.get("anchors", [])
-    if static_anchors:
-        valid = _validate_anchors(static_anchors)
-        for a in valid:
-            if a["id"] not in store.anchors():
-                store.add_anchor(
-                    anchor_id=a["id"],
-                    text=a["text"],
-                    reminder=a["reminder"],
-                    priority=a["priority"],
-                    probes=a["probes"],
-                    pinned=a.get("pinned", False),
-                )
-
-    # Seed global pins from durable store (cross-session persistence)
-    try:
-        durable = _get_durable()
-        global_pins = durable.load_pins()
-        for pin in global_pins:
-            if pin.get("scope") != "global":
-                continue
-            if pin["id"] in store.anchors():
-                continue
-            store.add_anchor(
-                anchor_id=pin["id"],
-                text=pin["text"],
-                reminder=pin.get("reminder", pin["text"][:120]),
-                priority=pin.get("priority", 50),
-                probes=pin.get("probes", []),
-                pinned=True,
-            )
-    except Exception as exc:
-        logger.warning("memlock: failed to seed global pins: %s", exc)
+    _service.on_start(session_id=session_id, **kwargs)
 
 
 def _on_end(session_id: str = "", **kwargs) -> None:
-    """Save the store for this session_id for durability (fired every turn)."""
-    if not session_id:
-        return
-    store = _get_store(session_id)
-    if store is None:
-        return
-    try:
-        store.save()
-    except Exception as exc:
-        logger.warning(
-            "memlock: on_session_end save failed for %s: %s",
-            session_id, exc,
-        )
+    _service.on_end(session_id=session_id, **kwargs)
 
 
 def _on_pre_llm(
@@ -401,161 +187,19 @@ def _on_pre_llm(
     user_message: str = "",
     conversation_history: list | None = None,
     **kwargs,
-) -> dict | str | None:
-    """Audit anchors post-compaction, rehydrate casualties."""
-    global _current_session_id, _session_turns
+):
+    """Audit anchors post-compaction, rehydrate casualties.
 
-    if not session_id:
-        return None
-    _current_session_id = session_id
-
-    store = _ensure_store(session_id)
-
-    # Per-session turn counter
-    _session_turns.setdefault(session_id, 0)
-    _session_turns[session_id] += 1
-    turn = _session_turns[session_id]
-
-    if conversation_history is None:
-        conversation_history = []
-
-    # ── detect compaction ───────────────────────────────────────────
-    summary_idx, summary_body = find_summary(conversation_history)
-    summary_hash = hash_summary_body(summary_body)
-
-    compaction_event = store.is_new_compaction(summary_hash)
-    if compaction_event and summary_hash is not None:
-        store.record_compaction(summary_hash, turn)
-
-    # ── safety net (no compaction, but many turns since reinjection) ──
-    hard_reinject_turns = int(_cfg.get("hard_reinject_turns", 40))
-    safety_net = (
-        not compaction_event
-        and hard_reinject_turns > 0
-        and (turn - store.last_reinject_turn) >= hard_reinject_turns
+    Delegates to memlock_core.MemlockService.pre_llm_turn; the returned
+    context dict is appended to plugin_user_context by turn_context.py.
+    """
+    return _service.pre_llm_turn(
+        session_id=session_id,
+        turn_id=turn_id,
+        user_message=user_message,
+        conversation_history=conversation_history,
+        **kwargs,
     )
-
-    # 'always' injects every turn; 'on-drift' only audits and injects on
-    # compaction or the safety net.
-    inject_mode = str(_cfg.get("inject", "on-drift"))
-    should_audit = compaction_event or safety_net
-
-    if inject_mode != "always" and not should_audit:
-        return None
-
-    anchors = store.sorted_anchors()
-    reverse_candidates: list[dict] = []
-    reverse_report: dict | None = None
-
-    # ── audit (drift state and /guard score; gating only in on-drift) ──
-    alive_ids: list[str] = []
-    drifted_ids: list[str] = []
-    if should_audit:
-        active_region, _ = split_context(conversation_history, summary_idx)
-        if user_message and not any(
-            str(msg.get("role", "")).lower() == "user"
-            and str(msg.get("content", "")) == user_message
-            for msg in active_region
-        ):
-            active_region.append({"role": "user", "content": user_message})
-        reverse_candidates, reverse_report = _run_reverse_audit(active_region)
-        detection_mode = _cfg.get("detection", "keyword")
-        drift_threshold = float(_cfg.get("drift_threshold", 0.5))
-
-        if detection_mode == "semantic" and anchors:
-            sim_threshold = float(_cfg.get("sim_threshold", 0.65))
-            model_name = str(_cfg.get("embedding_model", "all-MiniLM-L6-v2"))
-            window_chars = int(_cfg.get("semantic_window_chars", 1000))
-            alive_ids, drifted_ids = semantic_audit_anchors(
-                anchors, active_region, model_name=model_name,
-                sim_threshold=sim_threshold, window_chars=window_chars,
-            )
-        elif anchors:
-            alive_ids, drifted_ids = audit_anchors(
-                anchors, active_region, drift_threshold=drift_threshold
-            )
-
-        for aid in alive_ids:
-            store.mark_anchor_alive(aid, turn)
-        for did in drifted_ids:
-            store.mark_anchor_drifted(did)
-
-        score = store.compute_integrity_score()
-        reverse_diagnostics = None
-        if reverse_report is not None:
-            reverse_diagnostics = {
-                "absent": [f["canonical_id"] for f in reverse_report["findings"]
-                           if f["verdict"] == "ABSENT" and f["canonical_id"]],
-                "contradicted": [mid for f in reverse_report["findings"]
-                                 if f["verdict"] == "CONTRADICTED" for mid in f["memory_ids"]],
-                "stale": [mid for f in reverse_report["findings"]
-                          if f["verdict"] == "STORED_STALE" for mid in f["memory_ids"]],
-                "unknown": [mid for f in reverse_report["findings"]
-                            if f["verdict"] == "UNKNOWN" for mid in f["memory_ids"]],
-            }
-        store.log_drift(drifted_ids, score, reverse=reverse_diagnostics)
-
-        # ── alert ───────────────────────────────────────────────────
-        alert_floor = int(_cfg.get("alert_floor", 70))
-        alert_cooldown = float(_cfg.get("alert_cooldown_s", 1800))
-        if score >= 0 and score < alert_floor and store.can_alert(alert_cooldown):
-            alert_msg = (
-                f"[memlock] integrity score {score}% "
-                f"(session {session_id})"
-            )
-            if drifted_ids:
-                alert_msg += f" — drifted: {', '.join(drifted_ids[:5])}"
-            logger.warning(alert_msg)
-            # Optional shell-out
-            script = _cfg.get("alert_script", "")
-            if script:
-                try:
-                    import subprocess
-
-                    subprocess.Popen(
-                        [script, alert_msg],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except Exception as exc:
-                    logger.warning("memlock: alert script failed: %s", exc)
-            store.record_alert()
-
-    # ── rehydrate ───────────────────────────────────────────────────
-    # Candidate selection; slot and char budgets in _select_casualties cut.
-    all_ids = [a["id"] for a in anchors]
-    rehydrate_ids: list[str] = []
-    if inject_mode == "always":
-        rehydrate_ids = all_ids
-    elif drifted_ids:
-        rehydrate_ids = drifted_ids
-    elif safety_net:
-        rehydrate_ids = all_ids
-    elif not reverse_candidates:
-        return None
-
-    max_slots = int(_cfg.get("max_slots", 8))
-    max_chars = int(_cfg.get("max_reminder_chars", 600))
-    selected, remaining = _select_casualties(
-        store, rehydrate_ids, max_slots, max_chars
-    )
-    total_chars = sum(len(item.get("reminder", "")[:120]) + 4 for item in selected)
-    for candidate in sorted(reverse_candidates, key=lambda item: (-item["priority"], item["id"])):
-        reminder_chars = len(candidate["reminder"][:120]) + 4
-        if len(selected) >= max_slots or total_chars + reminder_chars > max_chars:
-            remaining.append(candidate["id"])
-            continue
-        selected.append(candidate)
-        total_chars += reminder_chars
-
-    reminder_block = _build_reminder_block(selected, remaining)
-    if reminder_block is None:
-        return None
-
-    store.set_reinject_turn(turn)
-
-    # Return context dict — appended to plugin_user_context in turn_context.py
-    return {"context": reminder_block}
 
 
 # ── tool: guard_pin ────────────────────────────────────────────────────
@@ -616,241 +260,26 @@ _PIN_SCHEMA = {
 
 
 def _pin_handler(args: dict | None = None, **kwargs) -> str:
-    """Tool handler for guard_pin — dispatches to _do_pin or _do_unpin.
-
-    Reads ``session_id`` from ``kwargs`` (forwarded by the tool dispatch
-    layer). Falls back to ``_current_session_id`` for compatibility with
-    vanilla Hermes that doesn't forward session_id.
-    """
-    if args is None:
-        args = {}
-
-    # Prefer forwarded session_id; fall back to last-seen global
-    session_id = kwargs.get("session_id", "") or _current_session_id
-    if not session_id:
-        return "Error: no active session; cannot pin before a session starts"
-    store = _ensure_store(session_id)
-
-    unpin_id = str(args.get("unpin", "")).strip()
-    if unpin_id:
-        return _do_unpin(store, unpin_id, args)
-    pin_id = str(args.get("pin_id", "")).strip()
-    if pin_id:
-        return _do_update_pin(store, pin_id, args)
-    return _do_pin(store, args)
-
-
-def _do_pin(store: SessionStore, args: dict) -> str:
-    # Flatten whitespace: newlines in pinned text could otherwise spoof
-    # extra list items or a second marker line inside the reminder block.
-    text = re.sub(r"\s+", " ", str(args.get("text", ""))).strip()
-    if not text:
-        return "Error: 'text' is required for pin"
-
-    max_pins = int(_cfg.get("max_pins", 16))
-    pinned_now = sum(1 for a in store.anchors().values() if a["pinned"])
-    if pinned_now >= max_pins:
-        return (
-            f"Error: pin limit reached ({max_pins}). "
-            f"Unpin something first (see /guard)."
-        )
-
-    reminder = re.sub(r"\s+", " ", str(args.get("reminder", ""))).strip()
-    if not reminder:
-        reminder = re.split(r"[.!?]\s+", text)[0][:120]
-
-    priority = max(1, min(100, int(args.get("priority", 50))))
-    probes = args.get("probes", [])
-    if not probes:
-        probes = _derive_probes(text)
-
-    anchor_id = f"pin_{int(time.time())}_{len(store.anchors())}"
-    scope = str(args.get("scope", "session")).strip().lower()
-    if scope not in ("session", "global"):
-        scope = "session"
-
-    store.add_anchor(
-        anchor_id=anchor_id,
-        text=text,
-        reminder=reminder,
-        priority=priority,
-        probes=[str(p) for p in probes],
-        pinned=True,
-    )
-
-    # Persist global-scoped pins to durable store
-    if scope == "global":
-        try:
-            durable = _get_durable()
-            durable.save_pin({
-                "id": anchor_id,
-                "text": text,
-                "reminder": reminder,
-                "priority": priority,
-                "probes": [str(p) for p in probes],
-                "scope": "global",
-                "pinned_at": time.time(),
-            })
-        except Exception as exc:
-            logger.warning("memlock: failed to persist global pin: %s", exc)
-
-    scope_note = " (global — survives sessions)" if scope == "global" else ""
-    return (
-        f"Pinned instruction (id={anchor_id}, priority={priority}, "
-        f"probes={len(probes)}, scope={scope}{scope_note}):\n  {text}\n"
-        f"Will survive context compaction."
-    )
-
-
-def _do_update_pin(store: SessionStore, pin_id: str, args: dict) -> str:
-    """Update an existing pin in place, keeping the same anchor id.
-
-    Newline flattening, reminder auto-trim and priority clamping apply to the
-    updated text exactly as for a new pin. Global-scoped pins are re-saved to
-    the durable store (save_pin upserts by id). A missing id is a clear error
-    listing the first available pin ids.
-    """
-    existing = store.get_anchor(pin_id)
-    if existing is None:
-        available = [
-            a["id"] for a in store.sorted_anchors() if a["pinned"]
-        ][:8]
-        listed = ", ".join(available) if available else "(none)"
-        return (
-            f"Error: pin '{pin_id}' not found. "
-            f"Available pin ids: {listed}"
-        )
-
-    # Same normalisation rules as _do_pin — updated text must not be able to
-    # do anything a new pin cannot (no reminder-block spoofing via newlines).
-    text = re.sub(r"\s+", " ", str(args.get("text", ""))).strip()
-    if not text:
-        return "Error: 'text' is required for update"
-
-    reminder = re.sub(r"\s+", " ", str(args.get("reminder", ""))).strip()
-    if not reminder:
-        reminder = re.split(r"[.!?]\s+", text)[0][:120]
-
-    priority = max(1, min(100, int(args.get("priority", existing["priority"]))))
-    probes = args.get("probes", [])
-    if not probes:
-        probes = _derive_probes(text)
-
-    if not store.update_anchor(
-        pin_id, text=text, reminder=reminder,
-        priority=priority, probes=[str(p) for p in probes],
-    ):
-        return f"Error: pin '{pin_id}' not found"
-
-    # If this id exists in the durable store it was a global pin: keep the
-    # durable copy in sync. save_pin upserts by id; session-only pins are
-    # untouched there.
-    durable_note = ""
-    try:
-        durable = _get_durable()
-        known = {p.get("id") for p in durable.load_pins()}
-        if pin_id in known:
-            durable.save_pin({
-                "id": pin_id,
-                "text": text,
-                "reminder": reminder,
-                "priority": priority,
-                "probes": [str(p) for p in probes],
-                "scope": "global",
-                "pinned_at": time.time(),
-            })
-            durable_note = " (global copy updated)"
-    except Exception as exc:
-        logger.warning("memlock: failed to persist global pin update: %s", exc)
-
-    return (
-        f"Updated pin (id={pin_id}, priority={priority}, "
-        f"probes={len(probes)}{durable_note}):\n  {text}\n"
-        f"Previous version kept in history."
-    )
-
-
-def _do_unpin(store: SessionStore, anchor_id: str, args: dict | None = None) -> str:
-    """Remove a pinned anchor by id.
-
-    Scope semantics for durable (global) pins:
-      - default / scope="session": remove only THIS session's copy; the
-        durable copy stays so other sessions keep the pin.
-      - args["scope"]="global": also remove the durable copy, so future
-        sessions stop seeding it.
-    """
-    ok = store.unpin(anchor_id)
-    if not ok:
-        return f"Error: anchor '{anchor_id}' not found or not pinned"
-
-    try:
-        durable = _get_durable()
-    except Exception as exc:
-        logger.warning("memlock: failed to open durable store for unpin: %s", exc)
-        return f"Unpinned: {anchor_id}"
-
-    if str((args or {}).get("scope", "session")).strip().lower() == "global":
-        try:
-            durable.remove_pin(anchor_id)
-        except Exception as exc:
-            # Best-effort; the session copy is already gone.
-            logger.warning("memlock: failed to remove durable pin: %s", exc)
-        return f"Unpinned globally: {anchor_id}"
-    return f"Unpinned: {anchor_id}"
+    """Tool handler for guard_pin — delegates to the service's pin lifecycle."""
+    if kwargs.get("session_id", ""):
+        # Keep last-seen-session semantics for handlers without forwarding.
+        _service.current_session_id = kwargs["session_id"]
+    return _service.pin_handler(args, session_id=kwargs.get("session_id", ""))
 
 
 # ── slash command ───────────────────────────────────────────────────────
 
 
 def _status_cmd(raw_args: str = "") -> str:
-    """Handle /guard slash command — current integrity score and anchor status."""
-    global _current_session_id
-
-    if not _current_session_id:
-        return "MemLock: no active session yet"
-    store = _ensure_store(_current_session_id)
-
-    score = store.integrity_score
-    anchors = store.sorted_anchors()
-
-    lines = [
-        f"MemLock — session {_current_session_id}",
-        f"  integrity_score: {score}% (anchors: {len(anchors)})",
-        f"  pins: {sum(1 for a in anchors if a['pinned'])}",
-        f"  static: {sum(1 for a in anchors if not a['pinned'])}",
-        f"  last compaction: {store._data.get('last_compaction_at', 'never')}",
-        "",
-    ]
-
-    if anchors:
-        lines.append("Anchors:")
-        for a in anchors:
-            status = "ALIVE" if not a["drifted"] else "DRIFTED"
-            kind = "[pin]" if a["pinned"] else "[static]"
-            lines.append(
-                f"  {kind} [{status}] {a['id']} "
-                f"(p={a['priority']}) — {a.get('reminder', '')[:60]}"
-            )
-
-    drift_log = store._data.get("drift_log", [])
-    if drift_log:
-        lines.append(f"\nDrift events: {len(drift_log)} (most recent first)")
-        for event in reversed(drift_log[-3:]):
-            when = time.strftime("%H:%M:%S", time.localtime(event["time"]))
-            lines.append(
-                f"  {when} score={event['score']}% "
-                f"casualties={len(event['casualties'])}"
-            )
-
-    return "\n".join(lines)
+    """Handle /guard slash command — integrity score and anchor status."""
+    return _service.status_text(raw_args)
 
 
 # ── registration ────────────────────────────────────────────────────────
 
 
 def register(ctx) -> None:
-    global _cfg
-    _cfg = _merge_cfg(_safe_cfg(ctx))
+    _merge_cfg(_safe_cfg(ctx))
 
     ctx.register_hook("on_session_start", _on_start)
     ctx.register_hook("pre_llm_call", _on_pre_llm)

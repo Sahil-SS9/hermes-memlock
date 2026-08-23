@@ -1,5 +1,7 @@
 """Tests for MemLock plugin: core integration tests. Run with pytest."""
-from detection import SUMMARY_PREFIX
+from memlock_core.detection import DEFAULT_SUMMARY_PREFIXES
+
+SUMMARY_PREFIX = DEFAULT_SUMMARY_PREFIXES[0]
 
 
 

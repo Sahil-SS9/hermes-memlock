@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 
-from detection import SUMMARY_PREFIX
+from memlock_core.detection import DEFAULT_SUMMARY_PREFIXES
+
+SUMMARY_PREFIX = DEFAULT_SUMMARY_PREFIXES[0]
 
 
 def _setup(memlock, fake_ctx_cls, base_cfg, session_id="upd-s"):
@@ -58,11 +60,9 @@ def test_update_keeps_anchor_id_and_updates_text(memlock, fake_ctx_cls, base_cfg
 
 
 def test_update_history_grows_and_caps_at_five(memlock, fake_ctx_cls, base_cfg):
-    from memlock import SessionStore  # not exported; use store module attr
+    from memlock_core.store import SessionStore
     _setup(memlock, fake_ctx_cls, base_cfg)
-    cap = memlock.SessionStore.HISTORY_CAP if hasattr(
-        memlock, "SessionStore"
-    ) else __import__("store").SessionStore.HISTORY_CAP
+    cap = SessionStore.HISTORY_CAP
     assert cap == 5
 
     _pin(memlock, {"text": "Version zero of the standing instruction"},

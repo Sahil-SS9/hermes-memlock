@@ -12,7 +12,7 @@ from typing import Callable
 
 import pytest
 
-import detection
+import memlock_core.detection as detection
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "reverse_audit_stale.json"
 

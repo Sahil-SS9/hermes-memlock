@@ -1,8 +1,10 @@
 """Shared fixtures for MemLock tests.
 
-The plugin module is loaded once, here, under the name "memlock" (the repo
-directory name is not a valid package name). Tests receive it via the
-``memlock`` fixture instead of repeating the importlib boilerplate.
+The plugin module is loaded once, here, as a real package under the name
+"memlock" (the repo directory name is not a valid package name). Package-mode
+loading matches how Hermes actually imports the plugin, and lets the shim's
+relative ``memlock_core`` import run. Tests receive it via the ``memlock``
+fixture instead of repeating the importlib boilerplate.
 
 Every test runs with HERMES_HOME pointed at a per-test tmp_path and with the
 plugin's module-level state reset, so no test can touch the real ~/.hermes
@@ -54,16 +56,15 @@ def isolated_hermes_home(tmp_path, monkeypatch):
     home = tmp_path / "hermes_home"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
-    _mod._stores.clear()
-    _mod._session_turns.clear()
-    _mod._current_session_id = ""
-    _mod._cfg = {}
-    # The lazy durable store and the lazy preference-adapter resolution are
-    # both cached at module level; reset them so no test inherits another
-    # test's backend (or HERMES_HOME-captured directory).
-    _mod._durable_store = None
-    if hasattr(_mod, "_reset_preference_adapter_cache"):
-        _mod._reset_preference_adapter_cache()
+    _mod._service.stores.clear()
+    _mod._service.session_turns.clear()
+    _mod._service.current_session_id = ""
+    _mod._service._cfg = {}
+    _mod._service.durable_store = None
+    _mod._service._explicit_preference_provider = None
+    # The lazy preference-adapter resolution is cached on the service; reset
+    # it so no test inherits another test's backend.
+    _mod._reset_preference_adapter_cache()
     yield home
 
 

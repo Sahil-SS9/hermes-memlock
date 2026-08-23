@@ -1,5 +1,7 @@
 """Tests for MemLock: behaviour with nothing pinned (effectively off)."""
-from detection import SUMMARY_PREFIX
+from memlock_core.detection import DEFAULT_SUMMARY_PREFIXES
+
+SUMMARY_PREFIX = DEFAULT_SUMMARY_PREFIXES[0]
 
 
 

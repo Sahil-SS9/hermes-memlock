@@ -270,10 +270,10 @@ def test_explicit_registration_precedes_config_adapter(
         ml.set_reverse_preference_provider(explicit_provider)
         ml._reset_preference_adapter_cache()
 
-        resolved = ml._resolve_preference_provider()
+        resolved = ml._service._resolve_preference_provider()
         assert resolved is explicit_provider
 
-        candidates, report = ml._run_reverse_audit([])
+        candidates, report = ml._service.run_reverse_audit([])
         assert candidates == []  # no active region overlap asserted here;
         assert report["status"] == "ok"
         assert explicit_rows  # provider value untouched by the audit call

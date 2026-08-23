@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
-import persistence
+import memlock_core.persistence as persistence
 
 
 def test_file_store_save_and_load(tmp_path):

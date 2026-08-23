@@ -1,6 +1,12 @@
 """Tests for MemLock: store persistence and detection lifecycle."""
-import store as store_mod
-from detection import SUMMARY_PREFIX, find_summary, split_context
+import memlock_core.store as store_mod
+from memlock_core.detection import (
+    DEFAULT_SUMMARY_PREFIXES,
+    find_summary,
+    split_context,
+)
+
+SUMMARY_PREFIX = DEFAULT_SUMMARY_PREFIXES[0]
 
 
 def test_store_create_and_persist():

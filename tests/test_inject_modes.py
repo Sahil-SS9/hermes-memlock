@@ -1,5 +1,7 @@
 """Tests for MemLock: inject modes, safety net budgets, anchor validation."""
-from detection import SUMMARY_PREFIX, find_summary
+from memlock_core.detection import DEFAULT_SUMMARY_PREFIXES, find_summary
+
+SUMMARY_PREFIX = DEFAULT_SUMMARY_PREFIXES[0]
 
 
 def _history_plain():
@@ -138,7 +140,7 @@ def test_pin_cap_enforced(plugin, memlock, base_cfg):
 
 def test_window_chars_degenerate_values_bounded(memlock):
     """Zero or tiny window_chars cannot explode the window count."""
-    import detection
+    import memlock_core.detection as detection
     region = [{"role": "user", "content": "x" * 100_000}]
     for bad in (0, -5, 100):
         windows = detection._build_windows(region, bad)

@@ -1,11 +1,15 @@
 """Compaction detection and keyword probe audit for MemLock.
 
-Compaction: scan conversation_history for the compressor's SUMMARY_PREFIX
+Compaction: scan conversation_history for the harness's summary prefix
 literal.  Hash the summary body; new/changed hash = compaction event.
 
 Keyword probe: scope to the non-summary region only.  An anchor's probes
-hitting only inside the summary block are NOT survival — the SUMMARY_PREFIX
+hitting only inside the summary block are NOT survival — the summary prefix
 demotes that text to background.
+
+Harness neutrality: this module knows NO harness names. Summary markers
+arrive as the ``prefixes`` parameter (or ``DEFAULT_SUMMARY_PREFIXES``);
+hosts pass their own compact-boundary literals per call.
 """
 from __future__ import annotations
 
@@ -14,32 +18,22 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Literal, TypedDict
+from typing import Any, Iterable, Literal, Sequence, TypedDict
 
 logger = logging.getLogger(__name__)
 
-# Import the compressor constants.  Fall back to frozen literals if the import
-# fails (vanilla Hermes may not expose the module).
-try:
-    from agent.context_compressor import (  # type: ignore[import-untyped]
-        SUMMARY_PREFIX,
-        LEGACY_SUMMARY_PREFIX,
-        _HISTORICAL_SUMMARY_PREFIXES,
-    )
-except ImportError:
-    SUMMARY_PREFIX = (
+# Default summary-boundary prefixes, in detection priority order. These are
+# frozen constants so the core works with zero configuration; a host whose
+# compressor words its marker differently passes its own ``prefixes`` list
+# instead of relying on these.
+LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
+DEFAULT_SUMMARY_PREFIXES: tuple[str, ...] = (
+    (
         "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
         "into the summary below."
-    )
-    LEGACY_SUMMARY_PREFIX = "[CONTEXT SUMMARY]:"
-    _HISTORICAL_SUMMARY_PREFIXES: tuple[str, ...] = ()
-
-# All known summary prefixes in detection priority order.
-_SUMMARY_PREFIXES: list[str] = [
-    SUMMARY_PREFIX,
+    ),
     LEGACY_SUMMARY_PREFIX,
-    *_HISTORICAL_SUMMARY_PREFIXES,
-]
+)
 
 
 def _message_text(msg: dict) -> str:
@@ -60,8 +54,12 @@ def _message_text(msg: dict) -> str:
 
 def find_summary(
     conversation_history: list[dict],
+    prefixes: Iterable[str] | None = None,
 ) -> tuple[int | None, str | None]:
     """Find the summary message in conversation_history.
+
+    ``prefixes`` are this harness's summary-boundary literals, in priority
+    order; None selects ``DEFAULT_SUMMARY_PREFIXES``.
 
     Returns (idx, summary_body).
       idx          — index of the summary message, or None if not found.
@@ -72,7 +70,7 @@ def find_summary(
     """
     for i, msg in enumerate(conversation_history):
         text = _message_text(msg)
-        for prefix in _SUMMARY_PREFIXES:
+        for prefix in (prefixes if prefixes is not None else DEFAULT_SUMMARY_PREFIXES):
             if text.startswith(prefix):
                 body = text[len(prefix):].strip()
                 return i, body

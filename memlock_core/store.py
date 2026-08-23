@@ -1,8 +1,9 @@
 """Per-session atomic JSON store for MemLock.
 
-Each session gets one file under ~/.hermes/memlock/<safe-sid>.json
-with anchors (static + pinned), integrity score, drift log, compaction state,
-and alert timestamp.  Writes use tmp + rename for atomicity.
+Each session gets one file under $MEMLOCK_HOME/memlock/<safe-sid>.json
+(MEMLOCK_HOME falls back to the host home directory) with anchors
+(static + pinned), integrity score, drift log, compaction state, and alert
+timestamp.  Writes use tmp + rename for atomicity.
 """
 from __future__ import annotations
 
@@ -16,13 +17,30 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+#: Host-home environment variable. Hosts may point MemLock's storage at a
+#: custom root by setting this (or MEMLOCK_HOME) before first use; the
+#: default keeps the historical layout under the user's home directory.
+_HOME_ENV_VARS = ("HERMES_HOME", "MEMLOCK_HOME")
+
+
+def _home_dir() -> str:
+    """First set host-home env var, else the user's home directory.
+
+    The fallback is deliberately harness-neutral: MEMLOCK_HOME under the
+    user's plain home.  Harnesses that own a home directory (Hermes, etc.)
+    pass it in via their env-var contract, so core never names one.
+    """
+    for var in _HOME_ENV_VARS:
+        val = os.environ.get(var, "").strip()
+        if val:
+            return val
+    return os.path.join(os.path.expanduser("~"), ".memlock")
+
+
 def _store_dir() -> Path:
-    # Resolved at call time so HERMES_HOME set after import (tests, embedding
-    # hosts) is honoured. `or` so an empty HERMES_HOME falls back too.
-    return Path(
-        os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"),
-        "memlock",
-    )
+    # Resolved at call time so env vars set after import (tests, embedding
+    # hosts) are honoured.
+    return Path(_home_dir(), "memlock")
 
 
 def _safe_sid(session_id: str) -> str:

@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from detection import SUMMARY_PREFIX, reverse_audit, reverse_audit_unavailable
+from memlock_core.detection import (
+    DEFAULT_SUMMARY_PREFIXES,
+    reverse_audit,
+    reverse_audit_unavailable,
+)
+
+SUMMARY_PREFIX = DEFAULT_SUMMARY_PREFIXES[0]
 
 NOW = "2026-08-04T08:00:00Z"
 
@@ -154,7 +160,7 @@ def test_pre_llm_queries_preferences_after_compaction_and_rehydrates_with_budget
             metadata_json={"memlock": {"standing": True, "priority": 90, "probes": ["one at a time"]}},
         )]
 
-    memlock._cfg = {
+    memlock._service._cfg = {
         "reverse_audit": True,
         "reverse_preference_query": "applicable user preferences",
         "reverse_limit": 25,
@@ -179,7 +185,7 @@ def test_pre_llm_provider_failure_leaves_turn_unchanged(memlock):
     def provider(query, limit):
         raise TimeoutError("unavailable")
 
-    memlock._cfg = {"reverse_audit": True, "inject": "on-drift", "hard_reinject_turns": 40}
+    memlock._service._cfg = {"reverse_audit": True, "inject": "on-drift", "hard_reinject_turns": 40}
     memlock.set_reverse_preference_provider(provider)
     history = [
         {"role": "system", "content": "System"},
