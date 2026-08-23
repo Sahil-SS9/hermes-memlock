@@ -58,6 +58,12 @@ def isolated_hermes_home(tmp_path, monkeypatch):
     _mod._session_turns.clear()
     _mod._current_session_id = ""
     _mod._cfg = {}
+    # The lazy durable store and the lazy preference-adapter resolution are
+    # both cached at module level; reset them so no test inherits another
+    # test's backend (or HERMES_HOME-captured directory).
+    _mod._durable_store = None
+    if hasattr(_mod, "_reset_preference_adapter_cache"):
+        _mod._reset_preference_adapter_cache()
     yield home
 
 

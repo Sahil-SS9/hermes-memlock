@@ -28,7 +28,47 @@ plugins:
 
 # Pin and then send a long message that triggers compaction;
 # the pin survives. That's the whole demo.
+
+# Change your mind? Update the pin in place — same id, old version kept:
+guard_pin(pin_id="<id from /guard>", text="Always reply in numbered lists")
 ```
+
+---
+
+## Setup wizard
+
+Instead of hand-editing config, run the stdlib-only detection script once:
+
+```bash
+python3 ~/.hermes/plugins/memlock/memlock_setup.py --dry-run   # report only
+python3 ~/.hermes/plugins/memlock/memlock_setup.py             # detect + apply
+python3 ~/.hermes/plugins/memlock/memlock_setup.py --provider severian
+python3 ~/.hermes/plugins/memlock/memlock_setup.py --prune-days 30
+```
+
+The wizard probes your Hermes installation and reports every finding, then
+writes **only** the `memlock:` section of `~/.hermes/config.yaml` (a
+timestamped backup is taken first; nothing outside that section is touched).
+Auto-detection checks:
+
+- Severian plugin directory (`$HERMES_HOME/plugins/severian/plugin.yaml`)
+  and/or a `SEVERIAN_DSN` environment variable → PostgreSQL backend
+- Mnemosyne plugin directory (`$HERMES_HOME/plugins/mnemosyne/`), a
+  `mnemosyne` entry under `plugins.enabled`, and any Mnemosyne database file
+- Exit codes: `0` configured, `1` nothing detected (guidance printed),
+  `2` error (e.g. `--prune-days < 7`)
+
+Detected provider verdicts:
+
+| Verdict | Evidence found | Config written |
+|---|---|---|
+| `severian` | plugin dir or `SEVERIAN_DSN` (wins when both providers are present) | `preference_adapter: severian`, plus `adapter_dsn` when available |
+| `mnemosyne` | plugin dir or enabled-config listing (DB file is reported but not sufficient on its own) | `preference_adapter: mnemosyne`, plus `adapter_db_path` when resolvable |
+| `none` | no provider evidence | `reverse_audit: true`, `preference_adapter: ""` — core pin/audit features work unchanged; only the reverse pass stays off |
+
+`--prune-days N` deletes session store files older than N days by mtime
+(minimum 7 — recent stores carry live audit state). It never touches
+`memlock/persist/` (durable global pins) or non-`.json` files.
 
 ---
 
@@ -177,7 +217,10 @@ probes. Note the model downloads lazily on first semantic audit.
 | `alert_cooldown_s` | `1800` | Min seconds between alerts (prevents spam) |
 | `alert_script` | `""` | Optional script invoked with the alert message |
 | `embedding_model` | `all-MiniLM-L6-v2` | Sentence-transformer for semantic mode |
-| `reverse_audit` | `false` | Query stored preferences after compaction (needs host adapter) |
+| `reverse_audit` | `false` | Query stored preferences after compaction (needs a preference adapter) |
+| `preference_adapter` | `""` | `""` = off; `severian` or `mnemosyne` (see below, or run memlock_setup.py) |
+| `adapter_dsn` | unset | PostgreSQL DSN for the severian adapter (falls back to `SEVERIAN_DSN`) |
+| `adapter_db_path` | unset | SQLite path for the mnemosyne adapter (falls back to Mnemosyne env vars / default layout) |
 | `reverse_preference_query` | `applicable user preferences` | Query string passed to the preference provider |
 | `reverse_limit` | `50` | Max preference rows retrieved per audit |
 | `anchors` | `[]` | Static anchors seeded from config |
@@ -185,8 +228,10 @@ probes. Note the model downloads lazily on first semantic audit.
 ---
 
 See `docs/REVERSE_AUDIT.md` for the reverse-audit developer guide: usage,
-report interpretation, Mnemosyne failure behaviour, and the forward-vs-reverse
-distinction.
+report interpretation, and the forward-vs-reverse distinction. The
+preference provider is selected through the adapter layer in
+`memlock_adapters/` — run `memlock_setup.py` to have it detected and wired
+for you.
 
 ## Slash Commands
 
@@ -196,16 +241,22 @@ distinction.
 
 ## Tool: `guard_pin`
 
-Pin or unpin a standing instruction.
+Pin, update, or unpin a standing instruction.
 
 | Param | Required | Description |
 |---|---|---|
-| `text` | For pin | The instruction to preserve |
+| `text` | For pin/update | The instruction to preserve (or the new wording for an update) |
+| `pin_id` | For update | Anchor id of an existing pin to update **in place**: same id retained, previous version kept in history (last 5 versions per pin) |
 | `priority` | No | 1-100 (default 50). Higher values get rehydrated first |
 | `reminder` | No | Short version for re-insertion (auto-trimmed) |
-| `probes` | No | Distinctive keywords for drift detection (auto-derived) |
-| `scope` | No | `session` (default, dies with session) or `global` (persists across sessions) |
+| `probes` | No | Distinctive keywords for drift detection (auto-derived from the current text on pin/update) |
+| `scope` | No | `session` (default, dies with session) or `global` (persists across sessions). On update: a global pin's durable copy is re-synced automatically. On unpin: `scope=global` also removes the durable copy |
 | `unpin` | For unpin | Anchor id to remove |
+
+```python
+# Update an existing pin in place — same anchor id, history kept:
+guard_pin(pin_id="pin_1755000000_0", text="Always reply in numbered lists")
+```
 
 ### Cross-session persistence
 

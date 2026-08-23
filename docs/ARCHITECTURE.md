@@ -97,6 +97,53 @@ Per-session state:
    excluded and never auto-reinjected. This closes the forward-only blind
    spot where preferences that were never configured as anchors were
    invisible to the audit. See `docs/REVERSE_AUDIT.md`.
+8. **Update-in-place with bounded history.** `guard_pin(pin_id, text)`
+   rewrites an existing anchor without changing its id, so drift state,
+   scores and references stay continuous across the edit. The pre-update
+   version is appended to a per-anchor `history` list capped at
+   `HISTORY_CAP = 5` entries; global-scoped pins re-persist through the
+   durable store (`save_pin` upserts by id), so future sessions seed the
+   updated wording.
+
+### Adapter layer (preference providers)
+
+The reverse audit needs *some* source of stored preferences, but the plugin
+core must never import a memory provider. That boundary lives in
+`memlock_adapters/`, the only package allowed to know provider specifics:
+
+- **Config-selected, lazily loaded.** `preference_adapter: severian |
+  mnemosyne` names an entry in the registry; the factory runs at the first
+  reverse-audit call (module-level cache), never at import time, so a
+  missing driver can't break plugin load or the `pre_llm_call` hook.
+- **Explicit registration wins.** A host-registered callback via
+  `set_reverse_preference_provider(fn)` takes precedence over any config
+  selection for the lifetime of the process (host adapters predate the
+  registry and must keep working).
+- **Fail-open everywhere.** Missing driver, unreachable DB, malformed rows:
+  each degrades to one warning + empty list / skipped row. An unknown
+  adapter name resolves to None = reverse pass disabled — never an error.
+- **Read-only by construction.** Severian queries `records` over psycopg
+  (DSN: config `adapter_dsn` → `SEVERIAN_DSN`) mapping JSONB payload keys;
+  Mnemosyne opens its sqlite file `mode=ro` (path: config `adapter_db_path`
+  → `MNEMOSYNE_DB_PATH`/`MNEMOSYNE_DATA_DIR` → `$HERMES_HOME/mnemosyne/
+  data/mnemosyne.db`) and maps `working_memory` rows via
+  `cursor.description` so column drift across Mnemosyne versions degrades
+  to None fields instead of KeyErrors.
+- **Normalisation contract.** Every row passes `normalise_row()`: it needs
+  a usable `id` AND `content`, fills missing optional columns with None,
+  coerces datetimes to ISO strings, and returns None for non-dict junk so
+  the finding/memory join stays deterministic.
+
+### Setup wizard
+
+`memlock_setup.py` (stdlib-only) detects which provider backs this install
+(plugin dirs, `plugins.enabled`, env vars, DB file) and writes only the
+`memlock:` section of `$HERMES_HOME/config.yaml` — timestamped backup
+first, PyYAML required for any write (without it: printed manual steps),
+detection verdicts reported honestly even when overridden by `--provider`.
+Pruning (`--prune-days N`, N ≥ 7) deletes old session stores by mtime and
+never touches `memlock/persist/`. Exit codes: 0 ok, 1 nothing detected,
+2 error.
 
 ### Optional dispatch patch
 

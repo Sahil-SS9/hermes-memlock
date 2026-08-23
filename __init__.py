@@ -46,6 +46,15 @@ except ImportError:
     from store import SessionStore  # type: ignore[no-redef]
     from persistence import get_store as _get_durable_store  # type: ignore[no-redef]
 
+try:
+    import memlock_adapters as _adapters_pkg
+except ImportError:
+    # Plain-module load: repo root is on sys.path in that mode.
+    try:
+        import memlock_adapters as _adapters_pkg  # type: ignore[no-redef]
+    except ImportError:
+        _adapters_pkg = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 # Per-session stores keyed by session_id.  No cross-session leakage.
@@ -56,6 +65,11 @@ _current_session_id: str = ""
 _cfg: dict[str, Any] = {}
 _durable_store: Any = None  # lazy-init on first use
 _reverse_preference_provider: Callable[[str, int], list[dict]] | None = None
+
+# _UNSET distinguishes "config adapter not resolved yet" from "resolved and
+# disabled (None)" so the lazy load runs exactly once per config generation.
+_UNSET = object()
+_preference_adapter: Any = _UNSET
 
 # Stable marker for reminder blocks.  Phrasing rules:
 #  - declarative, innocuous, no urgency theatre
@@ -203,17 +217,64 @@ def _build_reminder_block(
 def set_reverse_preference_provider(
     provider: Callable[[str, int], list[dict]] | None,
 ) -> None:
-    """Register the host adapter that queries complete Mnemosyne preference rows."""
+    """Register the host adapter that queries complete Mnemosyne preference rows.
+
+    Explicitly-registered providers take precedence over config-selected
+    adapters (``preference_adapter``) for the lifetime of the process.
+    """
     global _reverse_preference_provider
     _reverse_preference_provider = provider
 
 
+def _resolve_preference_provider() -> Callable[[str, int], list[dict]] | None:
+    """Pick the preference provider: explicit registration > config adapter.
+
+    The config-selected adapter is loaded LAZILY at first audit (module-level
+    cache, same pattern as _get_durable) so importing the plugin never pulls
+    a provider dependency. Unknown adapter names disable the reverse pass
+    with a warning — fail-open, never an error.
+    """
+    global _preference_adapter
+    if _reverse_preference_provider is not None:
+        return _reverse_preference_provider
+    if _preference_adapter is not _UNSET:
+        return _preference_adapter
+
+    name = str(_cfg.get("preference_adapter", "") or "").strip()
+    if not name or not _cfg.get("reverse_audit", False):
+        _preference_adapter = None
+        return None
+    if _adapters_pkg is None:
+        logger.warning(
+            "memlock: memlock_adapters package unavailable; "
+            "adapter '%s' disabled", name,
+        )
+        _preference_adapter = None
+        return None
+    try:
+        _preference_adapter = _adapters_pkg.get_provider(name)
+    except Exception as exc:
+        logger.warning(
+            "memlock: adapter '%s' failed to load: %s; reverse audit disabled",
+            name, exc,
+        )
+        _preference_adapter = None
+    return _preference_adapter
+
+
+def _reset_preference_adapter_cache() -> None:
+    """Test/config-reload hook: force re-resolution on the next audit."""
+    global _preference_adapter
+    _preference_adapter = _UNSET
+
+
 def _run_reverse_audit(active_region: list[dict]) -> tuple[list[dict], dict]:
     """Query the configured adapter and return budget-ready preference reminders."""
-    if not _cfg.get("reverse_audit", False) or _reverse_preference_provider is None:
+    provider = _resolve_preference_provider()
+    if not _cfg.get("reverse_audit", False) or provider is None:
         return [], {"status": "ok", "findings": [], "rehydrate_ids": [], "suppressed_ids": [], "errors": []}
     try:
-        rows = _reverse_preference_provider(
+        rows = provider(
             str(_cfg.get("reverse_preference_query", "applicable user preferences")),
             int(_cfg.get("reverse_limit", 50)),
         )
@@ -503,19 +564,28 @@ _PIN_SCHEMA = {
     "name": "guard_pin",
     "description": (
         "Pin a standing instruction that must survive context compaction. "
-        "Use 'text' to pin a new instruction. Use 'unpin' with an anchor id "
-        "to remove a previously pinned instruction."
+        "Use 'text' to pin a new instruction. Use 'pin_id' with 'text' to "
+        "update an existing pin in place (same anchor id, previous version "
+        "kept in history). Use 'unpin' with an anchor id to remove a "
+        "previously pinned instruction."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "text": {
                 "type": "string",
-                "description": "The standing instruction to preserve (for pin).",
+                "description": "The standing instruction to preserve (for pin or update).",
             },
             "unpin": {
                 "type": "string",
                 "description": "Anchor id to remove (for unpin).",
+            },
+            "pin_id": {
+                "type": "string",
+                "description": (
+                    "Anchor id of an existing pin to update in place with the new "
+                    "'text' (keeps the same id; prior version stored in history)."
+                ),
             },
             "reminder": {
                 "type": "string",
@@ -533,7 +603,11 @@ _PIN_SCHEMA = {
             "scope": {
                 "type": "string",
                 "enum": ["session", "global"],
-                "description": "session = dies with session (default). global = persists across sessions via durable store.",
+                "description": (
+                    "session = dies with session (default). global = persists across "
+                    "sessions via durable store. On unpin: scope=global removes the "
+                    "durable copy too; default leaves other sessions' copies intact."
+                ),
             },
         },
         "required": [],
@@ -559,7 +633,10 @@ def _pin_handler(args: dict | None = None, **kwargs) -> str:
 
     unpin_id = str(args.get("unpin", "")).strip()
     if unpin_id:
-        return _do_unpin(store, unpin_id)
+        return _do_unpin(store, unpin_id, args)
+    pin_id = str(args.get("pin_id", "")).strip()
+    if pin_id:
+        return _do_update_pin(store, pin_id, args)
     return _do_pin(store, args)
 
 
@@ -625,18 +702,101 @@ def _do_pin(store: SessionStore, args: dict) -> str:
     )
 
 
-def _do_unpin(store: SessionStore, anchor_id: str) -> str:
-    """Remove a pinned anchor by id. Also removes from durable store if present."""
+def _do_update_pin(store: SessionStore, pin_id: str, args: dict) -> str:
+    """Update an existing pin in place, keeping the same anchor id.
+
+    Newline flattening, reminder auto-trim and priority clamping apply to the
+    updated text exactly as for a new pin. Global-scoped pins are re-saved to
+    the durable store (save_pin upserts by id). A missing id is a clear error
+    listing the first available pin ids.
+    """
+    existing = store.get_anchor(pin_id)
+    if existing is None:
+        available = [
+            a["id"] for a in store.sorted_anchors() if a["pinned"]
+        ][:8]
+        listed = ", ".join(available) if available else "(none)"
+        return (
+            f"Error: pin '{pin_id}' not found. "
+            f"Available pin ids: {listed}"
+        )
+
+    # Same normalisation rules as _do_pin — updated text must not be able to
+    # do anything a new pin cannot (no reminder-block spoofing via newlines).
+    text = re.sub(r"\s+", " ", str(args.get("text", ""))).strip()
+    if not text:
+        return "Error: 'text' is required for update"
+
+    reminder = re.sub(r"\s+", " ", str(args.get("reminder", ""))).strip()
+    if not reminder:
+        reminder = re.split(r"[.!?]\s+", text)[0][:120]
+
+    priority = max(1, min(100, int(args.get("priority", existing["priority"]))))
+    probes = args.get("probes", [])
+    if not probes:
+        probes = _derive_probes(text)
+
+    if not store.update_anchor(
+        pin_id, text=text, reminder=reminder,
+        priority=priority, probes=[str(p) for p in probes],
+    ):
+        return f"Error: pin '{pin_id}' not found"
+
+    # If this id exists in the durable store it was a global pin: keep the
+    # durable copy in sync. save_pin upserts by id; session-only pins are
+    # untouched there.
+    durable_note = ""
+    try:
+        durable = _get_durable()
+        known = {p.get("id") for p in durable.load_pins()}
+        if pin_id in known:
+            durable.save_pin({
+                "id": pin_id,
+                "text": text,
+                "reminder": reminder,
+                "priority": priority,
+                "probes": [str(p) for p in probes],
+                "scope": "global",
+                "pinned_at": time.time(),
+            })
+            durable_note = " (global copy updated)"
+    except Exception as exc:
+        logger.warning("memlock: failed to persist global pin update: %s", exc)
+
+    return (
+        f"Updated pin (id={pin_id}, priority={priority}, "
+        f"probes={len(probes)}{durable_note}):\n  {text}\n"
+        f"Previous version kept in history."
+    )
+
+
+def _do_unpin(store: SessionStore, anchor_id: str, args: dict | None = None) -> str:
+    """Remove a pinned anchor by id.
+
+    Scope semantics for durable (global) pins:
+      - default / scope="session": remove only THIS session's copy; the
+        durable copy stays so other sessions keep the pin.
+      - args["scope"]="global": also remove the durable copy, so future
+        sessions stop seeding it.
+    """
     ok = store.unpin(anchor_id)
-    if ok:
-        # Also remove from durable store (best-effort)
+    if not ok:
+        return f"Error: anchor '{anchor_id}' not found or not pinned"
+
+    try:
+        durable = _get_durable()
+    except Exception as exc:
+        logger.warning("memlock: failed to open durable store for unpin: %s", exc)
+        return f"Unpinned: {anchor_id}"
+
+    if str((args or {}).get("scope", "session")).strip().lower() == "global":
         try:
-            durable = _get_durable()
             durable.remove_pin(anchor_id)
         except Exception as exc:
+            # Best-effort; the session copy is already gone.
             logger.warning("memlock: failed to remove durable pin: %s", exc)
-        return f"Unpinned: {anchor_id}"
-    return f"Error: anchor '{anchor_id}' not found or not pinned"
+        return f"Unpinned globally: {anchor_id}"
+    return f"Unpinned: {anchor_id}"
 
 
 # ── slash command ───────────────────────────────────────────────────────
@@ -702,7 +862,8 @@ def register(ctx) -> None:
         toolset="guard",
         description=(
             "Pin a standing instruction that must survive context compaction. "
-            "Use 'text' to pin.  Use 'unpin' with an anchor id to remove."
+            "Use 'text' to pin.  Use 'pin_id' with 'text' to update an "
+            "existing pin in place.  Use 'unpin' with an anchor id to remove."
         ),
         handler=_pin_handler,
         schema=_PIN_SCHEMA,

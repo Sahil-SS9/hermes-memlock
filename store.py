@@ -131,6 +131,47 @@ class SessionStore:
         self.save()
         return True
 
+    def get_anchor(self, anchor_id: str) -> dict | None:
+        return self._data["anchors"].get(anchor_id)
+
+    # Cap on retained previous versions per anchor (minimal versioning).
+    HISTORY_CAP = 5
+
+    def update_anchor(
+        self,
+        anchor_id: str,
+        *,
+        text: str,
+        reminder: str,
+        priority: int,
+        probes: list[str],
+    ) -> bool:
+        """Update text/reminder/priority/probes IN PLACE, keeping the id.
+
+        The pre-update version dict is appended to an ``history`` list on the
+        anchor so /guard-style introspection can show what changed; only the
+        last HISTORY_CAP versions are retained. Returns False if the anchor
+        does not exist (callers decide whether that is an error).
+        """
+        a = self._data["anchors"].get(anchor_id)
+        if a is None:
+            return False
+        history = a.setdefault("history", [])
+        history.append({
+            "text": a["text"],
+            "reminder": a["reminder"],
+            "priority": a["priority"],
+            "probes": list(a["probes"]),
+            "updated_at": time.time(),
+        })
+        a["history"] = history[-self.HISTORY_CAP:]
+        a["text"] = text
+        a["reminder"] = reminder
+        a["priority"] = priority
+        a["probes"] = probes
+        self.save()
+        return True
+
     def anchors(self) -> dict[str, dict]:
         return dict(self._data["anchors"])
 

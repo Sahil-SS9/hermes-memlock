@@ -16,9 +16,26 @@ memlock:
   embedding_model: all-MiniLM-L6-v2
   persistence_backend: file       # mnemosyne is unavailable without a host adapter
   reverse_audit: false             # query stored preferences after compaction
+  preference_adapter: ""           # "" = off; severian | mnemosyne (see below)
   reverse_preference_query: "applicable user preferences"
   reverse_limit: 50
   anchors: []                     # static tier; survives without guard_pin
+  #
+  # Preference adapters — reach the memory provider through a documented,
+  # read-only adapter instead of a host-registered callback. The adapter is
+  # loaded lazily at the first audit; failures degrade to no rows (fail-open).
+  #
+  # Severian (PostgreSQL). DSN resolution: memlock.adapter_dsn, then the
+  # SEVERIAN_DSN environment variable that Severian itself reads. Needs
+  # psycopg2 or psycopg installed.
+  # preference_adapter: severian
+  # adapter_dsn: "postgresql://user:pass@localhost:5432/severian"
+  #
+  # Mnemosyne (SQLite, stdlib-only). Path resolution:
+  # memlock.adapter_db_path, then MNEMOSYNE_DB_PATH / MNEMOSYNE_DATA_DIR,
+  # then $HERMES_HOME/mnemosyne/data/mnemosyne.db.
+  # preference_adapter: mnemosyne
+  # adapter_db_path: "~/.hermes/mnemosyne/data/mnemosyne.db"
   #
   # Example — static anchors that survive every compaction:
   # anchors:
