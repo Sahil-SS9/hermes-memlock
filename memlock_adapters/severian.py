@@ -92,7 +92,9 @@ def make_provider(dsn_override: str | None = None):
             return []
 
         try:
-            with connect(dsn) as conn:
+            # connect_timeout keeps an unreachable-but-not-refusing PG from
+            # hanging the pre_llm_call hook past the fail-open contract (L2).
+            with connect(dsn, connect_timeout=5) as conn:
                 with conn.cursor() as cur:
                     cur.execute(_QUERY, (list(_RECORD_TYPES), max(1, int(limit))))
                     rows = cur.fetchall() or []

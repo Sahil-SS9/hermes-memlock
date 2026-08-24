@@ -80,6 +80,11 @@ class FileStore:
         # verify=False opts out of integrity checking (setup wizard reads,
         # prune paths); the default is enforcing.
         self.verify = verify
+        # Stems that failed an integrity check on load. They are excluded
+        # from subsequent manifest writes so tampered bytes are never
+        # re-baselined (M3). In-memory per store instance: a fresh process
+        # re-derives quarantine from the manifest on first load anyway.
+        self._quarantined_stems: set[str] = set()
 
     def _pin_path(self, anchor_id: str) -> Path:
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in anchor_id)
@@ -88,25 +93,58 @@ class FileStore:
     def _manifest_path(self) -> Path:
         return self._dir / MANIFEST_NAME
 
-    @staticmethod
-    def _entry_for(path: Path) -> dict:
+    def _entry_for(self, path: Path) -> dict | None:
         try:
             size = path.stat().st_size
             digest = sha256_file(path)
         except OSError as exc:
-            # Fail-open: an unreadable file gets a zero entry rather than
+            # Fail-open: an unreadable file gets omitted from manifest rather than
             # blocking the save; load will re-baseline it if needed.
             logger.warning("memlock: could not stat/hash %s: %s", path.name, exc)
-            return {"sha256": "", "size": 0}
+            return None
         return {"sha256": digest, "size": size}
 
     def _write_manifest(self) -> None:
-        """Write manifest.json atomically over every current pin file."""
+        """Write manifest.json atomically over every current pin file.
+
+        Two protections shape this write (M1/M2/M3):
+        - read-modify-MERGE: entries for files we are not touching survive,
+          so a concurrent writer's pins can't be erased by our snapshot;
+        - files that failed integrity checks are excluded entirely, so
+          quarantined bytes are never silently re-baselined.
+        """
+        # Start from the on-disk manifest so unrelated entries survive (M1),
+        # then reconcile with reality on disk:
+        # - files present + readable -> fresh hash entry
+        # - files gone -> entry dropped (removal is explicit intent)
+        # - quarantined stems -> keep OLD entry so tampered bytes stay
+        #   rejected on every future load, never re-baselined (M3)
+        # - unreadable now -> stale entry dropped rather than zero-hashed (M2)
+        existing = self._load_manifest_pins() or {}
         pins: dict[str, dict] = {}
+        seen_stems: set[str] = set()
         for f in sorted(self._dir.glob("*.json")):
             if f.name == MANIFEST_NAME:
                 continue
-            pins[f.stem] = self._entry_for(f)
+            seen_stems.add(f.stem)
+            if f.stem in self._quarantined_stems:
+                # Tampered bytes: keep the OLD entry so the file stays
+                # quarantined; never record a hash of tampered content.
+                logger.warning(
+                    "memlock: manifest write skips quarantined pin %s", f.name,
+                )
+                if f.stem in existing:
+                    pins[f.stem] = existing[f.stem]
+                continue
+            entry = self._entry_for(f)
+            if entry is not None:
+                pins[f.stem] = entry
+            else:
+                # Unreadable now: drop any stale entry rather than recording
+                # a zero-hash that would permanently mismatch later (M2).
+                logger.warning(
+                    "memlock: manifest write omits unreadable pin %s", f.name,
+                )
         manifest = {
             "version": MANIFEST_VERSION,
             "generated_at": time.time(),
@@ -119,6 +157,16 @@ class FileStore:
 
     def save_pin(self, anchor: dict) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
+        # L4: 'manifest' is a reserved stem — a pin with that id would write
+        # over manifest.json itself and bootstrap a no-verification baseline.
+        anchor = dict(anchor)
+        if str(anchor.get("id", "")).strip().lower() == MANIFEST_NAME.removesuffix(".json"):
+            logger.warning(
+                "memlock: pin id 'manifest' is reserved; renaming to 'manifest_pin'"
+            )
+            anchor["id"] = "manifest_pin"
+            if isinstance(anchor.get("text"), str) and not anchor.get("reminder"):
+                anchor["reminder"] = anchor["text"][:120]
         path = self._pin_path(anchor["id"])
         payload = {
             "id": anchor["id"],
@@ -199,6 +247,10 @@ class FileStore:
                 "memlock: %d pin file(s) quarantined by integrity check: %s",
                 len(quarantined), ", ".join(quarantined),
             )
+            # Remember them so _write_manifest never re-baselines tampered
+            # bytes (M3).
+            for name in quarantined:
+                self._quarantined_stems.add(name[:-len(".json")] if name.endswith(".json") else name)
         return pins
 
     def remove_pin(self, anchor_id: str) -> None:

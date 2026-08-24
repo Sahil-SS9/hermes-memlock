@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.5.1 — Gate-findings hardening (2026-08-24)
+
+### HIGH
+- `--harness claude-code|mcp` now actually wires the chosen harness: claude-code
+  installs hooks via settings_installer; mcp prints the server snippet. Previously
+  every mode wrote Hermes config regardless of detection.
+- MCP audit path no longer mutates shared MemlockService state; summary_prefixes
+  is passed per-call, making concurrent front-ends safe.
+- mcp_command operator-trust level documented in config.yaml.
+
+### MEDIUM
+- Manifest write merges with the on-disk baseline so a stale writer cannot erase
+  another writer's pin entries (M1).
+- Unreadable pin files are omitted from the manifest instead of zero-hashed,
+  ending permanent-quarantine-on-transient-error (M2).
+- Quarantined tampered files are excluded from re-baselining — their old entries
+  survive, so tampered bytes stay rejected on every later load (M3).
+- MCP client reader buffers remainder bytes across reads; responses pipelined
+  behind notifications are no longer silently dropped (M4).
+- Batched JSON-RPC requests return the full response array per JSON-RPC 2.0 (M5).
+- Session-id slugification appends a short hash so distinct ids cannot alias to
+  one store file (M6); generated pin ids use a uuid suffix against same-second
+  unpin/repin collisions (M7).
+
+### LOW / NITS
+- Stdio server loop bounded by select timeout (no infinite wedge).
+- Severian adapter passes connect_timeout=5.
+- Dead ImportError fallbacks pointing at nonexistent submodules removed.
+- Reserved 'manifest' pin stem renamed on save (can no longer clobber the manifest).
+- SKILL.md examples now match the real guard_pin schema.
+- Duplicate detect_provider call removed from setup wizard.
+- alert_script child runs in its own session and is reaped with timeout.
+- test_rollback bare conditional assertion made meaningful.
+
 ## 0.5.0 — Stage 5: Agent Skills packaging + docs (complete)
 
 ### Agent Skills packaging (SKILL.md)

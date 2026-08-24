@@ -26,8 +26,11 @@ import json
 import logging
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
+
+from uuid import uuid4
 
 from .detection import (
     DEFAULT_SUMMARY_PREFIXES,
@@ -495,11 +498,23 @@ class MemlockService:
                     try:
                         import subprocess
 
-                        subprocess.Popen(
+                        proc = subprocess.Popen(
                             [script, alert_msg],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
+                            # Own process group so the script can't keep the
+                            # gateway's session alive; bounded reap below so
+                            # a hung script doesn't accumulate as a zombie.
+                            start_new_session=True,
                         )
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            try:
+                                proc.wait(timeout=5)
+                            except Exception:
+                                pass
                     except Exception as exc:
                         logger.warning("memlock: alert script failed: %s", exc)
                 store.record_alert()
@@ -593,7 +608,7 @@ class MemlockService:
         if not probes:
             probes = _derive_probes(text)
 
-        anchor_id = f"pin_{int(time.time())}_{len(store.anchors())}"
+        anchor_id = f"pin_{uuid4().hex[:8]}"
         scope = str(args.get("scope", "session")).strip().lower()
         if scope not in ("session", "global"):
             scope = "session"

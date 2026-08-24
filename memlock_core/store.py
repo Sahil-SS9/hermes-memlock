@@ -44,8 +44,22 @@ def _store_dir() -> Path:
 
 
 def _safe_sid(session_id: str) -> str:
-    """Slugify a session id into a safe filename component."""
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id)
+        """Slugify a session id into a safe filename component.
+
+        We want different session ids to map to different filenames where possible.
+        Replace '/' with '_slash_' and '.' with '_dot_' to avoid collisions
+        like 'sess/a' vs 'sess.a'. All other non-alnum/not-in-'-_' become '_'.
+        """
+        mapping = {'/': '_slash_', '.': '_dot_'}
+        res = []
+        for c in session_id:
+            if c.isalnum() or c in '-_':
+                res.append(c)
+            elif c in mapping:
+                res.append(mapping[c])
+            else:
+                res.append('_')
+        return ''.join(res)
 
 
 def _store_path(session_id: str) -> Path:

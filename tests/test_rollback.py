@@ -280,7 +280,7 @@ def test_rollback_through_mcp_memlock_update(monkeypatch, tmp_path):
     assert "Pinned instruction" in pin_out
     import re
 
-    match = re.search(r"id=(pin_\d+_\d+)", pin_out)
+    match = re.search(r"id=(pin_[0-9a-f]+)", pin_out)
     assert match, pin_out
     pin_id = match.group(1)
 

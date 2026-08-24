@@ -23,12 +23,16 @@ Quickstart:
   - Generic MCP: Run `python3 -m mcp_server` and configure your MCP client to
     connect to it using stdio (command: `python3 -m mcp_server`).
 
-  After installation, use the following commands:
-  - `guard_pin <name> <value>` - Pin a memory anchor
-  - `guard_pin list` - List all pinned anchors with version history
-  - `guard_pin <name> --action rollback --pin_id <id>` - Roll back a pin to a prior version
-  - `guard_pin <name> --action update --value <new_value>` - Update a pin and archive the old value
-  - `/guard` or `memlock_status` - View current pin status and audit results
+  After installation, the model can call the `guard_pin` tool. Real parameters
+  (see its schema): `text`, `pin_id`, `unpin`, `reminder`, `priority`,
+  `probes`, `scope` ("session"|"global"), `action` ("rollback").
+  - Pin: guard_pin { text: "Always reply in bullet points", priority: 80 }
+  - Update in place (keeps id, archives old version to history):
+    guard_pin { pin_id: "pin_1a2b3c4d", text: "new wording" }
+  - Roll back to a prior version from history:
+    guard_pin { action: "rollback", pin_id: "pin_1a2b3c4d", version: -2 }
+  - Unpin: guard_pin { unpin: "pin_1a2b3c4d" } (add scope: "global" for durable pins)
+  - Status/audit: `/guard` (Hermes) or the memlock_status MCP tool
 
   MemLock works without a dedicated memory provider; keyword/semantic audits
   function standalone. For preference-aware audits, install Severian or Mnemosyne,

@@ -27,9 +27,25 @@ from .tools import build_dispatcher
 
 
 def main() -> int:
-    """Stdio transport loop: one JSON-RPC request per stdin line."""
+    """Stdio transport loop: one JSON-RPC request per stdin line.
+
+    Reads via select with a generous idle timeout (L1) so a wedged
+    dispatcher or a half-dead parent cannot block this process forever:
+    on idle expiry the loop exits cleanly rather than hanging.
+    """
+    import select
+
     dispatch = build_dispatcher()
-    for line in sys.stdin:
+    stdin = sys.stdin
+    idle_timeout_s = 3600.0  # one hour of silence => clean exit
+    while True:
+        ready, _, _ = select.select([stdin], [], [], idle_timeout_s)
+        if not ready:
+            # Parent went quiet without closing stdin (crashed client).
+            break
+        line = stdin.readline()
+        if not line:  # EOF — parent closed stdin, normal shutdown
+            break
         line = line.strip()
         if not line:
             continue
