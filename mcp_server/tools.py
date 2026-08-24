@@ -269,21 +269,15 @@ class MemlockDispatcher:
         session_id = str(args.get("session_id", ""))
         # MCP callers supply their harness's compaction markers per call
         # (spec: the server cannot know them). Applied for THIS call only;
-        # the service's own defaults are restored before returning so one
-        # caller's wording never leaks into another's.
+        # the service's own defaults are used if none provided.
         prefixes = args.get("summary_prefixes")
-        saved = self.service.summary_prefixes
-        if isinstance(prefixes, list) and prefixes:
-            try:
-                self.service.summary_prefixes = [str(p) for p in prefixes]
-            except Exception:
-                self.service.summary_prefixes = saved
         try:
-            return self._audit_inner(args, session_id)
+            return self._audit_inner(args, session_id, prefixes)
         finally:
-            self.service.summary_prefixes = saved
+            # No need to restore service.summary_prefixes since we don't mutate it
+            pass
 
-    def _audit_inner(self, args: dict, session_id: str) -> dict:
+    def _audit_inner(self, args: dict, session_id: str, summary_prefixes: list[str] | None = None) -> dict:
         history = args.get("conversation_history")
         if not isinstance(history, list):
             history = []
@@ -294,10 +288,12 @@ class MemlockDispatcher:
                     "role": str(msg.get("role", "")),
                     "content": msg.get("content", ""),
                 })
+        # Use the passed-in prefixes for this audit call
         result = self.service.pre_llm_turn(
             session_id=session_id,
             user_message=str(args.get("user_message", "") or ""),
             conversation_history=clean,
+            summary_prefixes=summary_prefixes,
         )
         block = (result or {}).get("context") if isinstance(result, dict) else None
         if not block:

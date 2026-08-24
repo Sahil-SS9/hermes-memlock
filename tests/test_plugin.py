@@ -44,7 +44,9 @@ def test_safety_net(plugin, memlock):
     store.add_anchor("pin_1", "Always use British English Standard",
                      "British English", priority=80,
                      probes=["British English"], pinned=True)
-    memlock._session_turns["test-s"] = 50
+    # Simulate 50 turns without reinjection to trigger safety net
+    for _ in range(50):
+        store.increment_turn()
 
     history = [
         {"role": "system", "content": "You are helpful"},
@@ -65,7 +67,9 @@ def test_no_compaction_noop(plugin, memlock):
     store = memlock._ensure_store("test-s")
     store.add_anchor("pin_1", "Use bullet points", "bullet points",
                      priority=80, probes=["bullets"], pinned=True)
-    memlock._session_turns["test-s"] = 5
+    # Simulate 5 turns (less than hard_reinject_turns=40)
+    for _ in range(5):
+        store.increment_turn()
 
     history = [
         {"role": "system", "content": "You are helpful"},
@@ -159,7 +163,9 @@ def test_safety_net_no_false_positive(plugin, memlock):
     store = memlock._ensure_store("test-s")
     store.add_anchor("pin_1", "Use bullet points", "bullet points",
                      priority=80, probes=["bullets"], pinned=True)
-    memlock._session_turns["test-s"] = 30
+    # Simulate 30 turns (less than hard_reinject_turns=40)
+    for _ in range(30):
+        store.increment_turn()
 
     history = [
         {"role": "system", "content": "You are helpful"},

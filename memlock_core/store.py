@@ -71,6 +71,7 @@ def _blank() -> dict:
         "drift_log": [],
         "last_alert_at": None,
         "last_reinject_turn": 0,
+        "turn_count": 0,
     }
 
 
@@ -78,6 +79,8 @@ class SessionStore:
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
         self._data: dict[str, Any] = self._load()
+        # non-persisted turn count for safety net
+        self._turn_count: int = 0
 
     @property
     def _path(self) -> Path:
@@ -349,3 +352,13 @@ class SessionStore:
     def set_reinject_turn(self, turn: int) -> None:
         self._data["last_reinject_turn"] = turn
         self.save()
+
+    @property
+    def turn_count(self) -> int:
+        return self._data.get("turn_count", 0)
+
+    def increment_turn(self) -> int:
+        current = self._data.get("turn_count", 0) + 1
+        self._data["turn_count"] = current
+        self.save()
+        return current

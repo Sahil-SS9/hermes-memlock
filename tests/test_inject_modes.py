@@ -95,7 +95,9 @@ def test_safety_net_respects_max_slots(memlock, fake_ctx_cls, base_cfg):
     for i in range(6):
         store.add_anchor(f"pin_{i}", f"Rule number {i}", f"rule {i}",
                          priority=90 - i, probes=[f"rule {i}"], pinned=True)
-    memlock._session_turns["test-s"] = 50
+    # Simulate 50 turns without reinjection to trigger safety net
+    for _ in range(50):
+        store.increment_turn()
 
     result = memlock._on_pre_llm(
         session_id="test-s", turn_id="1", user_message="Hello",

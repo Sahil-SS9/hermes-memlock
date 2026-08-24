@@ -349,7 +349,6 @@ def main(argv: list[str] | None = None) -> int:
     # ── detection ────────────────────────────────────────────────────
     detected, findings = detect_provider(home)
     verdict = detected if args.provider == "auto" else args.provider
-    detected, findings = detect_provider(home)
     harness_verdict = args.harness if args.harness != "auto" else None
     if harness_verdict is None:
         # Auto-detect harness
@@ -363,9 +362,9 @@ def main(argv: list[str] | None = None) -> int:
         elif claude_settings_cwd.exists() or claude_settings_home.exists():
             harness_verdict = "claude-code"
         else:
-            harness_verdict = "mcp"
-            print("  No Hermes or Claude Code detected; defaulting to MCP generic mode.")
-            print("  Manual wiring may be needed for your MCP client.")
+            harness_verdict = "hermes"
+            print("  No Hermes or Claude Code detected; defaulting to Hermes config mode.")
+            print("  Manual step: add/update the memlock: section in config.yaml")
     else:
         print(f"  Using --harness override: {harness_verdict}")
 
@@ -404,12 +403,55 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  (note: {home / 'config.yaml'} does not exist yet)")
         return exit_code
 
+    # Always compute the updates first (may involve provider detection logic)
     updates = desired_memlock_section(verdict, args, harness_verdict)
-    backup = backup_config(home)
-    if backup:
-        print(f"\nBacked up config to {backup.name}")
-    used_yaml, message = merge_memlock_keys(home, updates)
-    print(message)
+    
+    # Apply based on harness verdict
+    if harness_verdict == "hermes":
+        # Write to Hermes config.yaml (existing behavior)
+        backup = backup_config(home)
+        if backup:
+            print(f"\nBacked up config to {backup.name}")
+        used_yaml, message = merge_memlock_keys(home, updates)
+        print(message)
+    elif harness_verdict == "claude-code":
+        # Apply Claude Code settings installer
+        from shims.claude_code.settings_installer import apply_to_file
+        import os
+        claude_settings_path = home / ".claude" / "settings.json"
+        claude_settings_path.parent.mkdir(parents=True, exist_ok=True)
+        final_settings = apply_to_file(str(claude_settings_path))
+        print(f"Applied MemLock hooks to {claude_settings_path}")
+        # Print what was installed (hooks section)
+        hooks_section = final_settings.get("hooks", {})
+        if hooks_section:
+            print("Installed hooks:")
+            for event, hook_list in hooks_section.items():
+                print(f"  {event}: {len(hook_list)} hook(s)")
+        else:
+            print("No hooks installed")
+    elif harness_verdict == "mcp":
+        # Print MCP config snippet without writing config.yaml
+        print()
+        print("MCP configuration snippet:")
+        print("Add this to your MCP client's configuration:")
+        print()
+        print('  "memlock": {')
+        print('    "command": "python3",')
+        print('    "args": ["-m", "mcp_server"],')
+        print('    "transport": "stdio"')
+        print("  }")
+        print()
+        print("Make sure the memlock MCP server is available in your PATH or")
+        print("provide the full path to the mcp_server module.")
+    else:
+        # Fallback - write to config.yaml (should not happen with proper validation)
+        backup = backup_config(home)
+        if backup:
+            print(f"\nBacked up config to {backup.name}")
+        used_yaml, message = merge_memlock_keys(home, updates)
+        print(message)
+
     if verdict == "none" and exit_code == 0 and detected == "none":
         exit_code = 1  # nothing detected: guidance printed, signal with 1
     return exit_code

@@ -371,6 +371,7 @@ class MemlockService:
         turn_id: str = "",
         user_message: str = "",
         conversation_history: list | None = None,
+        summary_prefixes: list[str] | None = None,
         **kwargs,
     ) -> dict | str | None:
         """Audit anchors post-compaction, rehydrate casualties.
@@ -380,21 +381,25 @@ class MemlockService:
         """
         if not session_id:
             return None
-        self.current_session_id = session_id
+        
+        # Use passed-in prefixes or fall back to service defaults
+        active_prefixes = (
+            [str(p) for p in summary_prefixes]
+            if summary_prefixes is not None
+            else self.summary_prefixes
+        )
 
         store = self.ensure_store(session_id)
 
         # Per-session turn counter
-        self.session_turns.setdefault(session_id, 0)
-        self.session_turns[session_id] += 1
-        turn = self.session_turns[session_id]
+        turn = store.increment_turn()
 
         if conversation_history is None:
             conversation_history = []
 
         # ── detect compaction ───────────────────────────────────────────
         summary_idx, summary_body = find_summary(
-            conversation_history, prefixes=self.summary_prefixes
+            conversation_history, prefixes=active_prefixes
         )
         summary_hash = hash_summary_body(summary_body)
 
