@@ -46,8 +46,8 @@ def server_info() -> dict:
     }
 
 
-def handle_request(raw_line: str, dispatch) -> dict | None:
-    """Handle one raw JSON-RPC line; returns the response dict or None.
+def handle_request(raw_line: str, dispatch) -> list[dict] | None:
+    """Handle one raw JSON-RPC line; returns the response dicts or None.
 
     Notifications produce no response. Malformed lines produce a Parse Error
     with id=null. Anything unexpected inside a known method becomes an
@@ -56,14 +56,14 @@ def handle_request(raw_line: str, dispatch) -> dict | None:
     try:
         message = json.loads(raw_line)
     except (TypeError, ValueError):
-        return _err(None, PARSE_ERROR, "Parse error")
+        return [_err(None, PARSE_ERROR, "Parse error")]
 
     if isinstance(message, list):
         responses = [
             r for r in (_handle_one(m, dispatch) for m in message)
             if r is not None
         ]
-        return responses[0] if responses else None  # single-flight loop
+        return responses  # batch: return all responses (may be empty)
     return _handle_one(message, dispatch)
 
 

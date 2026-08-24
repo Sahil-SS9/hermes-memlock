@@ -132,69 +132,100 @@ def _send(proc: subprocess.Popen, payload: dict) -> None:
         raise _ProviderFailure(f"failed writing to MCP provider: {exc}") from exc
 
 
-def _read_line(proc: subprocess.Popen, deadline: float) -> str:
-    """Read one newline-terminated response line, honouring the deadline.
+def _read_line(proc: subprocess.Popen, deadline: float, buffer: bytearray | None = None) -> tuple[str, bytearray]:
+        """Read one newline-terminated response line, honouring the deadline.
 
-    Uses a selector on the raw fd so a wedged provider cannot block the
-    audit past the timeout. Platforms whose selector cannot watch pipes
-    degrade to a blocking readline (timeout unenforced there) rather than
-    refusing to work at all.
-    """
-    stdout = proc.stdout
-    if stdout is None:
-        raise _ProviderFailure("child stdout unavailable")
-    sel: selectors.BaseSelector | None = None
-    try:
-        sel = selectors.DefaultSelector()
-        sel.register(stdout, selectors.EVENT_READ)
-    except (OSError, ValueError):
-        if sel is not None:
-            sel.close()
-        sel = None
-    buf = bytearray()
-    try:
-        while True:
+        Uses a selector on the raw fd so a wedged provider cannot block the
+        audit past the timeout. Platforms whose selector cannot watch pipes
+        degrade to a blocking readline (timeout unenforced there) rather than
+        refusing to work at all.
+
+        Returns (line, remaining_buffer) where remaining_buffer contains any
+        bytes after the newline that belong to the next message.
+        """
+        stdout = proc.stdout
+        if stdout is None:
+            raise _ProviderFailure("child stdout unavailable")
+        sel: selectors.BaseSelector | None = None
+        try:
+            sel = selectors.DefaultSelector()
+            sel.register(stdout, selectors.EVENT_READ)
+        except (OSError, ValueError):
             if sel is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("timed out waiting for MCP provider")
-                if not sel.select(remaining):
-                    raise TimeoutError("timed out waiting for MCP provider")
-                chunk = os.read(stdout.fileno(), 65536)
-            else:  # pragma: no cover - non-pipe-capable platforms
-                chunk = stdout.readline()
-            if not chunk:
-                raise _ProviderFailure("MCP provider closed the connection")
-            buf.extend(chunk)
-            if b"\n" in buf:
-                break
-    finally:
-        if sel is not None:
-            sel.close()
-    line, _, _rest = bytes(buf).partition(b"\n")
-    return line.decode("utf-8", errors="replace")
+                sel.close()
+            sel = None
+        if buffer is None:
+            buffer = bytearray()
+        try:
+            while True:
+                if sel is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("timed out waiting for MCP provider")
+                    if not sel.select(remaining):
+                        raise TimeoutError("timed out waiting for MCP provider")
+                    chunk = os.read(stdout.fileno(), 65536)
+                else:  # pragma: no cover - non-pipe-capable platforms
+                    chunk = stdout.readline()
+                if not chunk:
+                    raise _ProviderFailure("MCP provider closed the connection")
+                buffer.extend(chunk)
+                if b"\n" in buffer:
+                    line, _, remainder = buffer.partition(b"\n")
+                    # Keep remainder in buffer for next call
+                    buffer[:] = remainder
+                    return line.decode("utf-8", errors="replace"), buffer
+        finally:
+            if sel is not None:
+                sel.close()
 
 
 def _request(proc: subprocess.Popen, payload: dict, req_id: int,
-             deadline: float) -> dict:
-    """Send a request and return its matching response object.
+             deadline: float, buffer: bytearray | None = None) -> dict:
+        """Send a request and return its matching response object.
 
-    Notifications, server-initiated messages and undecodable lines are
-    skipped; only the reply carrying ``req_id`` counts. EOF/timeout raise.
+        Notifications, server-initiated messages and undecodable lines are
+        skipped; only the reply carrying ``req_id`` counts. EOF/timeout raise.
+
+        The read buffer is shared with the caller (M4): when *buffer* is
+        None a fresh one is created locally, but when the caller passes one
+        — as the query flow does across handshake → tools/call — leftover
+        bytes from earlier reads are consumed before touching the pipe, so
+        responses pipelined behind a previous reply are never lost.
+        """
+        if buffer is None:
+            buffer = bytearray()
+        _send(proc, payload)
+        while True:
+            # Drain already-buffered complete lines first (M4).
+            while b"\n" in buffer:
+                line, _, remainder = bytes(buffer).partition(b"\n")
+                buffer[:] = remainder
+                try:
+                    message = json.loads(line.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue  # tolerate chatty garbage between real responses
+                if isinstance(message, dict) and message.get("id") == req_id:
+                    return message
+            line, buffer = _read_line(proc, deadline, buffer)
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue  # tolerate chatty garbage between real responses
+            if isinstance(message, dict) and message.get("id") == req_id:
+                return message
+
+
+def _handshake(proc: subprocess.Popen, deadline: float,
+               buffer: bytearray | None = None) -> bytearray:
+    """initialize → notifications/initialized, validating the result.
+
+    Returns the (possibly non-empty) read buffer so bytes that arrived
+    pipelined behind the initialize response survive into the next request —
+    discarding them was the M4 data-loss bug.
     """
-    _send(proc, payload)
-    while True:
-        line = _read_line(proc, deadline)
-        try:
-            message = json.loads(line)
-        except ValueError:
-            continue  # tolerate chatty garbage between real responses
-        if isinstance(message, dict) and message.get("id") == req_id:
-            return message
-
-
-def _handshake(proc: subprocess.Popen, deadline: float) -> None:
-    """initialize → notifications/initialized, validating the result."""
+    if buffer is None:
+        buffer = bytearray()
     response = _request(
         proc,
         {
@@ -205,7 +236,7 @@ def _handshake(proc: subprocess.Popen, deadline: float) -> None:
                 "clientInfo": _CLIENT_INFO,
             },
         },
-        _INIT_ID, deadline,
+        _INIT_ID, deadline, buffer,
     )
     if "error" in response:
         raise _ProviderFailure(
@@ -215,6 +246,7 @@ def _handshake(proc: subprocess.Popen, deadline: float) -> None:
         raise _ProviderFailure("initialize returned no result object")
     # Notification: no id, no response expected.
     _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+    return buffer
 
 
 # ── result parsing ────────────────────────────────────────────────────────
@@ -405,7 +437,10 @@ def make_provider(
 
         raw_rows: list[object] = []
         try:
-            _handshake(proc, deadline)
+            # One buffer shared across handshake and call: bytes pipelined
+            # behind the initialize response are the tools/call response's
+            # first bytes on chatty servers (M4).
+            buf = _handshake(proc, deadline)
             response = _request(
                 proc,
                 {
@@ -418,7 +453,7 @@ def make_provider(
                         },
                     },
                 },
-                _CALL_ID, deadline,
+                _CALL_ID, deadline, buf,
             )
             if "error" in response:
                 raise _ProviderFailure(
