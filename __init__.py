@@ -86,7 +86,10 @@ def __getattr__(name: str):
 
 # Public surface used by tests/host code. Kept as module attributes so the
 # shim reads exactly like the pre-extraction plugin did.
-PIN_SCHEMA_PROPERTIES = ("text", "unpin", "pin_id", "reminder", "priority", "probes", "scope")
+PIN_SCHEMA_PROPERTIES = (
+    "text", "unpin", "pin_id", "action", "version", "reminder", "priority",
+    "probes", "scope",
+)
 
 
 def _service_for(session_id: str = "") -> MemlockService:
@@ -210,8 +213,11 @@ _PIN_SCHEMA = {
         "Pin a standing instruction that must survive context compaction. "
         "Use 'text' to pin a new instruction. Use 'pin_id' with 'text' to "
         "update an existing pin in place (same anchor id, previous version "
-        "kept in history). Use 'unpin' with an anchor id to remove a "
-        "previously pinned instruction."
+        "kept in history). Use 'action': 'rollback' with 'pin_id' to restore "
+        "a prior version from that pin's history (the displaced current "
+        "version is itself kept in history; optional 'version' index selects "
+        "a deeper one, default -1 = most recent previous version). Use "
+        "'unpin' with an anchor id to remove a previously pinned instruction."
     ),
     "parameters": {
         "type": "object",
@@ -227,8 +233,24 @@ _PIN_SCHEMA = {
             "pin_id": {
                 "type": "string",
                 "description": (
-                    "Anchor id of an existing pin to update in place with the new "
-                    "'text' (keeps the same id; prior version stored in history)."
+                    "Anchor id of an existing pin: to update in place with the new "
+                    "'text', or (with action='rollback') the pin whose history to "
+                    "restore from."
+                ),
+            },
+            "action": {
+                "type": "string",
+                "enum": ["rollback"],
+                "description": (
+                    "With pin_id: 'rollback' restores a prior version of that pin "
+                    "from its history."
+                ),
+            },
+            "version": {
+                "type": "integer",
+                "description": (
+                    "With action='rollback': index into the pin's history. Default "
+                    "-1 = most recent previous version; 0 = oldest retained."
                 ),
             },
             "reminder": {
@@ -292,7 +314,9 @@ def register(ctx) -> None:
         description=(
             "Pin a standing instruction that must survive context compaction. "
             "Use 'text' to pin.  Use 'pin_id' with 'text' to update an "
-            "existing pin in place.  Use 'unpin' with an anchor id to remove."
+            "existing pin in place.  Use action='rollback' with 'pin_id' to "
+            "restore a prior version from its history.  Use 'unpin' with an "
+            "anchor id to remove."
         ),
         handler=_pin_handler,
         schema=_PIN_SCHEMA,

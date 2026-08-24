@@ -558,6 +558,8 @@ class MemlockService:
         if unpin_id:
             return self.unpin(store, unpin_id, args)
         pin_id = str(args.get("pin_id", "")).strip()
+        if str(args.get("action", "")).strip().lower() == "rollback":
+            return self.rollback_pin(store, pin_id, args)
         if pin_id:
             return self.update_pin(store, pin_id, args)
         return self.do_pin(store, args)
@@ -691,6 +693,76 @@ class MemlockService:
             f"Previous version kept in history."
         )
 
+    def rollback_pin(
+        self, store: SessionStore, pin_id: str, args: dict | None = None,
+    ) -> str:
+        """Restore a prior version of a pin from its history (ChronoMem).
+
+        Selection semantics: ``args['version']`` is an optional index into
+        the anchor's history list; the default (-1, or any negative index)
+        selects the MOST RECENT previous version, 0 the oldest retained.
+        The displaced CURRENT state is pushed onto history first — rollback
+        destroys nothing and remains itself rollback-able. Global-scoped
+        pins are re-persisted to the durable store so future sessions seed
+        the restored wording.
+        """
+        existing = store.get_anchor(pin_id)
+        if existing is None:
+            available = [
+                a["id"] for a in store.sorted_anchors() if a["pinned"]
+            ][:8]
+            listed = ", ".join(available) if available else "(none)"
+            return (
+                f"Error: pin '{pin_id}' not found. "
+                f"Available pin ids: {listed}"
+            )
+        history = existing.get("history") or []
+        if not history:
+            return (
+                f"Error: pin '{pin_id}' has no version history to roll back to. "
+                f"Update it first (guard_pin with pin_id + text)."
+            )
+        try:
+            version = int((args or {}).get("version", -1))
+        except (TypeError, ValueError):
+            return "Error: 'version' must be an integer index into the pin's history"
+
+        if not store.rollback_anchor(pin_id, version=version):
+            return (
+                f"Error: version index {version} out of range for pin "
+                f"'{pin_id}' ({len(history)} version(s) in history; use -1 "
+                f"for the most recent previous version)."
+            )
+
+        restored = store.get_anchor(pin_id) or {}
+        # Re-persist when this id exists in the durable store (global pin);
+        # save_pin upserts by id, session-only pins are untouched there.
+        durable_note = ""
+        try:
+            durable = self.get_durable()
+            known = {p.get("id") for p in durable.load_pins()}
+            if pin_id in known:
+                durable.save_pin({
+                    "id": pin_id,
+                    "text": restored.get("text", ""),
+                    "reminder": restored.get(
+                        "reminder", restored.get("text", "")[:120],
+                    ),
+                    "priority": restored.get("priority", 50),
+                    "probes": list(restored.get("probes") or []),
+                    "scope": "global",
+                    "pinned_at": time.time(),
+                })
+                durable_note = " (global copy rolled back)"
+        except Exception as exc:
+            logger.warning("memlock: failed to persist global pin rollback: %s", exc)
+
+        return (
+            f"Rolled back pin (id={pin_id}, priority={restored.get('priority', 50)}"
+            f"{durable_note}):\n  {restored.get('text', '')}\n"
+            f"Displaced version kept in history."
+        )
+
     def unpin(self, store: SessionStore, anchor_id: str,
               args: dict | None = None) -> str:
         """Remove a pinned anchor by id.
@@ -750,6 +822,24 @@ class MemlockService:
                     f"  {kind} [{status}] {a['id']} "
                     f"(p={a['priority']}) — {a.get('reminder', '')[:60]}"
                 )
+
+        # Compact per-pin version history (ChronoMem): id, version count,
+        # current text head. Only pins that actually HAVE history appear.
+        pinned_with_history = [
+            a for a in anchors if a["pinned"] and (a.get("history") or [])
+        ]
+        if pinned_with_history:
+            lines.append("Pin version history (oldest -> newest, then current):")
+            for a in pinned_with_history:
+                versions = a["history"]
+                heads = " | ".join(
+                    f"{h.get('text', '')[:30]}" for h in versions
+                )
+                lines.append(
+                    f"  {a['id']} ({len(versions)} prior version(s)) "
+                    f"current: {a.get('text', '')[:60]}"
+                )
+                lines.append(f"    history: {heads}")
 
         drift_log = store._data.get("drift_log", [])
         if drift_log:

@@ -77,16 +77,35 @@ TOOLS: list[dict] = [
     ),
     _tool(
         "memlock_update",
-        "Update an existing pin in place, keeping its id (history retained).",
+        (
+            "Update an existing pin in place, keeping its id (history "
+            "retained). With action='rollback' instead restores a prior "
+            "version of the pin from its history (optional 'version' index; "
+            "default -1 = most recent previous version)."
+        ),
         {
             **SESSION_ID_PROP,
             "pin_id": {"type": "string", "description": "Anchor id of the pin to update."},
             "text": {"type": "string", "description": "The new instruction text."},
+            "action": {
+                "type": "string", "enum": ["rollback"],
+                "description": (
+                    "'rollback' restores a prior version from the pin's history "
+                    "instead of updating."
+                ),
+            },
+            "version": {
+                "type": "integer",
+                "description": (
+                    "With action='rollback': index into the pin's history. Default "
+                    "-1 = most recent previous version; 0 = oldest retained."
+                ),
+            },
             "reminder": {"type": "string", "description": "Short version for re-insertion (optional)."},
             "priority": {"type": "integer", "description": "Importance 1-100."},
             "probes": {"type": "array", "items": {"type": "string"}},
         },
-        ["session_id", "pin_id", "text"],
+        ["session_id", "pin_id"],
     ),
     _tool(
         "memlock_status",
@@ -159,9 +178,7 @@ class MemlockDispatcher:
         if tool_name == "memlock_unpin":
             return self._require(args, ("session_id", "pin_id"), self._call_unpin)
         if tool_name == "memlock_update":
-            return self._require(
-                args, ("session_id", "pin_id", "text"), self._call_update,
-            )
+            return self._require(args, ("session_id", "pin_id"), self._call_update)
         if tool_name == "memlock_status":
             return self._require(args, ("session_id",), self._call_status)
         if tool_name == "memlock_audit":
@@ -226,6 +243,13 @@ class MemlockDispatcher:
     def _call_update(self, args: dict) -> dict:
         session_id = str(args.get("session_id", ""))
         store = self.service.ensure_store(session_id)
+        # Rollback rides memlock_update via action='rollback': same pin_id
+        # selector, no 'text' required — the restored text comes from history.
+        if str(args.get("action", "")).strip().lower() == "rollback":
+            out = self.service.rollback_pin(store, str(args.get("pin_id", "")), args)
+            return self._text_result(out, is_error=out.startswith("Error:"))
+        if not str(args.get("text", "") or "").strip():
+            return self._error_result("'text' is required to update")
         priority = args.get("priority")
         out = self.service.update_pin(store, str(args.get("pin_id", "")), {
             "text": args.get("text", ""),

@@ -90,6 +90,23 @@ class SessionStore:
     def _load(self) -> dict[str, Any]:
         try:
             raw = json.loads(self._path.read_text())
+            # Integrity is ADVISORY for session stores: a hash mismatch is a
+            # warning + proceed (the file may be mid-write from another
+            # process), unlike durable pins where mismatches quarantine.
+            stored_hash = raw.pop("self_sha256", None)
+            anchors_payload = raw.get("anchors")
+            if stored_hash:
+                actual = hashlib.sha256(
+                    json.dumps(
+                        anchors_payload, sort_keys=True, ensure_ascii=False,
+                    ).encode("utf-8"),
+                ).hexdigest()
+                if actual != stored_hash:
+                    logger.warning(
+                        "memlock: session store %s failed self-integrity "
+                        "check (anchors sha256 mismatch); loading anyway",
+                        self._path.name,
+                    )
             # overlay any keys missing in earlier schema versions
             blank = _blank()
             blank.update(raw)
@@ -103,7 +120,14 @@ class SessionStore:
 
     def save(self) -> None:
         try:
-            _atomic_write(self._path, self._data)
+            data = dict(self._data)
+            data["self_sha256"] = hashlib.sha256(
+                json.dumps(
+                    self._data.get("anchors"), sort_keys=True,
+                    ensure_ascii=False,
+                ).encode("utf-8"),
+            ).hexdigest()
+            _atomic_write(self._path, data)
         except Exception as exc:
             logger.warning("memlock: store write failed: %s", exc)
 
@@ -192,6 +216,51 @@ class SessionStore:
 
     def anchors(self) -> dict[str, dict]:
         return dict(self._data["anchors"])
+
+    def rollback_anchor(self, anchor_id: str, *, version: int = -1) -> bool:
+        """Restore a prior version of an anchor from its history.
+
+        Selection semantics: ``version`` indexes into the anchor's history
+        list. The default (-1) is the MOST RECENT previous version; any
+        other negative or positive index follows Python list indexing
+        (0 = oldest retained version). Out-of-range selections return False.
+
+        Restoring pushes the DISPLACED current state onto the front of the
+        history (nothing is destroyed), then the HISTORY_CAP trim applies.
+        Returns False if the anchor does not exist or has no history.
+        """
+        a = self._data["anchors"].get(anchor_id)
+        if a is None:
+            return False
+        history = a.get("history") or []
+        try:
+            victim = history[version]
+        except IndexError:
+            return False
+        if not isinstance(victim, dict):
+            return False
+        # Displaced CURRENT state becomes a history entry first.
+        history.append({
+            "text": a["text"],
+            "reminder": a["reminder"],
+            "priority": a["priority"],
+            "probes": list(a["probes"]),
+            "updated_at": time.time(),
+            "rolled_back_from": version,
+        })
+        restored = {
+            "text": str(victim.get("text", "")),
+            "reminder": str(victim.get("reminder", victim.get("text", "")[:120])),
+            "priority": int(victim.get("priority", 50)),
+            "probes": [str(p) for p in (victim.get("probes") or [])],
+        }
+        # Drop the consumed version, keep the displaced one — net count only
+        # grows by one, so the cap trims exactly as an update would.
+        history.remove(victim)
+        a["history"] = history[-self.HISTORY_CAP:]
+        a.update(restored)
+        self.save()
+        return True
 
     def sorted_anchors(self) -> list[dict]:
         return sorted(

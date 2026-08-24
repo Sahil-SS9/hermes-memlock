@@ -183,9 +183,12 @@ def test_global_pin_seeds_both_sessions_and_survives_local_unpin(
     anchors = memlock._get_store("sess-beta").anchors()
     assert gid in anchors and "British English" in anchors[gid]["text"]
 
-    # Durable copy exists exactly once under persist/.
+    # Durable copy exists exactly once under persist/ (manifest.json is the
+    # Stage-4 integrity index, not a pin).
     persist_dir = isolated_hermes_home / "memlock" / "persist"
-    files = list(persist_dir.glob("*.json"))
+    files = [
+        f for f in persist_dir.glob("*.json") if f.name != "manifest.json"
+    ]
     assert len(files) == 1
 
     # Unpin in alpha only.
@@ -194,8 +197,8 @@ def test_global_pin_seeds_both_sessions_and_survives_local_unpin(
     assert gid not in memlock._get_store("sess-alpha").anchors()
     assert gid in memlock._get_store("sess-beta").anchors(), \
         "beta must keep its seeded copy"
-    assert len(list(persist_dir.glob("*.json"))) == 1, \
-        "durable copy must survive a session-scoped unpin"
+    assert len(list(persist_dir.glob("*.json"))) == 2, \
+        "durable copy must survive a session-scoped unpin"  # pin + manifest
 
     # A NEW session still gets the global pin re-seeded.
     memlock._on_start(session_id="sess-gamma")
@@ -206,7 +209,8 @@ def test_global_pin_seeds_both_sessions_and_survives_local_unpin(
     # copy too...
     out = _pin(memlock, {"unpin": gid, "scope": "global"}, session_id="sess-beta")
     assert "Unpinned globally" in out
-    assert len(list(persist_dir.glob("*.json"))) == 0
+    # only the manifest remains after the durable pin file is removed
+    assert [p.name for p in persist_dir.glob("*.json")] == ["manifest.json"]
     assert gid not in memlock._get_store("sess-beta").anchors()
 
     # ...and a fresh session no longer sees it.
