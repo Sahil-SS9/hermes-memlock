@@ -37,6 +37,17 @@ memlock:
   # preference_adapter: mnemosyne
   # adapter_db_path: "~/.hermes/mnemosyne/data/mnemosyne.db"
   #
+  # MCP provider adapter. TRUST LEVEL: the mcp_command below is executed as
+  # an arbitrary subprocess by this plugin on every reverse-audit query.
+  # Only set it (or MEMLOCK_MCP_COMMAND) to launch commands you fully control
+  # — it is operator-level trust, equivalent to putting a binary on PATH, NOT
+  # a sandboxed data source. The binary is resolved via PATH lookup; prefer
+  # absolute paths in shared environments.
+  # preference_adapter: mcp
+  # mcp_command: ["python3", "/absolute/path/to/your-memory-mcp-server.py"]
+  # mcp_tool: search            # tool name to invoke with {query, limit}
+  # mcp_timeout_s: 10           # per-query deadline; timeout fails open to []
+  #
   # Example — static anchors that survive every compaction:
   # anchors:
   #   - id: format-bullets
