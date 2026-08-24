@@ -88,6 +88,16 @@ register_adapter(
         "memlock_adapters.mnemosyne", fromlist=["get_preference_provider"]
     ).get_preference_provider,
 )
+# Generic MCP-first adapter: any external memory provider speaking MCP
+# (stdio) works with zero bespoke code. Config keys mcp_command / mcp_url /
+# mcp_tool / mcp_timeout_s; stdlib-only, so the lazy-import dance is only
+# about keeping this module's import cost out of non-MCP installs.
+register_adapter(
+    "mcp",
+    lambda: __import__(
+        "memlock_adapters.mcp_provider", fromlist=["get_preference_provider"]
+    ).get_preference_provider,
+)
 
 
 def normalise_row(raw: object) -> dict | None:
