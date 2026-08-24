@@ -1,54 +1,34 @@
 # Changelog
 
-## 0.5.0 — Stage 4: pin rollback + integrity manifests (in progress)
+## 0.5.0 — Stage 5: Agent Skills packaging + docs (complete)
 
-### Pin version history & rollback (ChronoMem completion)
+### Agent Skills packaging (SKILL.md)
+- Added root SKILL.md per agentskills.io open standard with YAML frontmatter
+- Includes description, quickstart per harness, guard_pin usage examples, and status checking
 
-- `/guard` (and `memlock_status`) lists each pinned anchor's version history
-  compactly: pin id, prior-version count, current text head, plus the oldest→
-  newest history text heads. Pins with no edits add no noise.
-- `guard_pin` gains `action: "rollback"` with a required `pin_id`; restores a
-  selected prior version from that anchor's history. Selection semantics:
-  default (`version` omitted or -1) = most recent previous version;
-  `version: 0` = oldest retained; any integer index works; out-of-range is a
-  clear error leaving state untouched.
-- Rollback destroys nothing: the displaced CURRENT state is pushed onto the
-  history first, so rollback itself remains rollback-able; repeated default
-  rollbacks swap between the two most recent states (classic undo), and the
-  HISTORY_CAP=5 trim applies exactly as for updates.
-- Global-scoped pins re-persist to the durable FileStore on rollback so
-  future sessions seed the restored wording ("global copy rolled back").
-- Works on every surface: Hermes shim handler, `MemlockService.rollback_pin`,
-  and MCP `memlock_update` with `action: "rollback"` (only `session_id` +
-  `pin_id` required there).
+### Setup wizard harness detection (--harness)
+- Extended memlock_setup.py with --harness {auto,hermes,claude-code,mcp} 
+- Auto-detection: HERMES_HOME layout => hermes; .claude/settings.json => claude-code; neither => mcp
+- hermes: existing behavior unchanged (writes to config.yaml)
+- claude-code: installs hooks via shims.claude_code.settings_installer.apply_to_file
+- mcp: prints MCP config snippet for user's MCP client config
+- Provider detection (severian/mnemosyne/mcp/none) stays as-is and composes with harness selection
 
-### Pin-file integrity manifests (ContextNest)
+### Documentation updates
+- README.md: Added portability matrix table (Hermes/Claude Code/MCP-generic vs hooks support/injection mechanism/provider adapters)
+- README.md: Updated quickstart to reference SKILL.md
+- docs/ARCHITECTURE.md: Added layer diagram section (core -> shims -> adapters)
+- CHANGELOG.md: This 0.5.0 entry summarizing all five stages
+- memlock_core/__init__.py: Bumped __version__ to '0.5.0'
 
-- Durable pins: `persist/manifest.json`
-  (`{version: 1, generated_at, pins: {<id>: {sha256, size}}}`) is rewritten
-  atomically on EVERY durable-store change — `save_pin`, `remove_pin` and
-  rollback re-persists included.
-- `FileStore.load_pins()` verifies each pin file against the manifest;
-  mismatched files are quarantined (skipped + one warning naming them),
-  never silently loaded. A missing manifest bootstraps a fresh baseline
-  from the current files (pre-0.5.0 installs keep working); an unparseable
-  manifest warns and rebuilds the baseline instead of failing.
-- Session store JSON gains `self_sha256` (sha256 of the anchors payload)
-  written on every save. On load a mismatch logs a warning and proceeds —
-  integrity is advisory for session stores, enforcing for durable pins.
-  Files from older versions without the field load silently.
-
-### Tests
-
-- New suites: `tests/test_rollback.py` (restoration under same id,
-  displaced-state preservation, cap across repeated rollbacks, durable
-  re-sync, unknown-pin errors, version-index selection, /guard history
-  display, MCP surface, post-compaction rehydration of restored pins) and
-  `tests/test_integrity.py` (manifest write/refresh/quarantine/bootstrap/
-  corrupt-manifest fail-open, verify opt-out, session-store hash round-trip,
-  mismatch warning, legacy-file compatibility). Suite grows to 195 tests.
+### Test extensions
+- Extended tests/test_setup.py with >=4 new test functions:
+  - --harness auto-detection matrix (hermes-home present, .claude present, neither)
+  - claude-code apply path creating hooks in temp settings.json
+  - mcp mode printing snippet without writing anywhere unexpected
 
 ## 0.4.0 — provider-agnostic adapters, setup wizard, pin update-in-place
+ — provider-agnostic adapters, setup wizard, pin update-in-place
 
 ### Preference adapter layer (`memlock_adapters/`)
 

@@ -11,6 +11,8 @@ the model's working memory.
 
 ## 60-second Quickstart
 
+See [SKILL.md](SKILL.md) for complete harness-specific installation instructions.
+
 ```bash
 # Clone into Hermes plugins directory
 git clone https://github.com/Sahil-SS9/hermes-memlock.git ~/.hermes/plugins/memlock
@@ -33,6 +35,7 @@ plugins:
 guard_pin(pin_id="<id from /guard>", text="Always reply in numbered lists")
 ```
 
+
 ---
 
 ## Setup wizard
@@ -45,6 +48,21 @@ python3 ~/.hermes/plugins/memlock/memlock_setup.py             # detect + apply
 python3 ~/.hermes/plugins/memlock/memlock_setup.py --provider severian
 python3 ~/.hermes/plugins/memlock/memlock_setup.py --prune-days 30
 ```
+
+## Portability Matrix
+
+MemLock is designed to work across different agent harnesses with varying levels of integration:
+
+| Harness | Hooks Support | Injection Mechanism | Provider Adapters |
+|---------|---------------|-------------------|-------------------|
+| **Hermes** | Full (native plugin) | Context compaction detection + reminder injection | Severian, Mnemosyne, MCP-adapter |
+| **Claude Code** | Hooks via `.claude/settings.json` | Precompaction snapshot + post-compaction audit | MCP-adapter (via server) |
+| **MCP-generic** | Manual tool calls | MCP tools: `memlock_pin`, `memlock_unpin`, `memlock_update`, `memlock_status`, `memlock_audit` | MCP-adapter (direct connection) |
+
+**Notes:**
+- Hooks support: Automatic triggering based on harness events
+- Injection mechanism: How MemLock gets reminders into the agent's context
+- Provider adapters: Which memory backends can be used for preference-aware audits
 
 The wizard probes your Hermes installation and reports every finding, then
 writes **only** the `memlock:` section of `~/.hermes/config.yaml` (a

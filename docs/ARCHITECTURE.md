@@ -145,6 +145,39 @@ Pruning (`--prune-days N`, N ≥ 7) deletes old session stores by mtime and
 never touches `memlock/persist/`. Exit codes: 0 ok, 1 nothing detected,
 2 error.
 
+
+
+### Layer Diagram
+
+MemLock follows a layered architecture to maintain harness-agnosticism:
+
+```
+Harness-specific layer (shims/)
+├── Hermes plugin          ← memlock/plugin.py
+├── Claude Code hooks      ← shims/claude_code/  
+└─┬ MCP server            ← mcp_server/
+  │   (stdio server for any MCP-speaking harness)
+  └
+Core engine (memlock_core/)
+├── Detection & audit      ← memlock_core/detection.py
+├── Pin lifecycle          ← memlock_core/store.py
+├── Persistence            ← memlock_core/persistence.py
+└── Service orchestrator   ← memlock_core/__init__.py
+Adapter layer (memlock_adapters/)
+├─┬ Direct adapters (fast paths)
+│ ├── Severian (PostgreSQL) ← memlock_adapters/severian.py
+│ └── Mnemosyne (SQLite)    ← memlock_adapters/mnemosyne.py
+└─┬ MCP adapter (universal)
+  └── Generic MCP client  ← memlock_adapters/mcp_provider.py
+```
+
+Data flow:
+1. Harness shim detects compaction/event and calls MemlockService
+2. Core service runs detection/audit using harness-provided summary_prefixes
+3. If reverse_audit enabled, service calls configured preference adapter
+4. Adapter queries memory provider (direct or via MCP) 
+5. Results flow back to core for reminder generation
+6. Harness shim injects reminder into agent context
 ### Optional dispatch patch
 
 Vanilla Hermes does not forward `session_id` to plugin tool handlers.

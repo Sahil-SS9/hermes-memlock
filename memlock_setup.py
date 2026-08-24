@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 PROVIDERS = ("auto", "severian", "mnemosyne", "none")
+HARNESSES = ("auto", "hermes", "claude-code", "mcp")
 
 _MEMLOCK_SECTION_RE = re.compile(r"(?ms)^memlock:\s*\n(?! )")
 
@@ -152,7 +153,7 @@ def _mnemosyne_in_enabled_config(home: Path) -> bool:
 # ── config mutation ──────────────────────────────────────────────────────
 
 
-def desired_memlock_section(verdict: str, args: argparse.Namespace) -> dict:
+def desired_memlock_section(verdict: str, args: argparse.Namespace, harness_verdict: str = "hermes") -> dict:
     """The exact keys this tool owns. Nothing outside them is touched."""
     section: dict[str, Any] = {
         "reverse_audit": True,
@@ -304,6 +305,13 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         help="Override detection (default: auto)",
     )
+
+    parser.add_argument(
+        "--harness",
+        choices=HARNESSES,
+        default="auto",
+        help="Select harness to configure (default: auto)",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -341,6 +349,26 @@ def main(argv: list[str] | None = None) -> int:
     # ── detection ────────────────────────────────────────────────────
     detected, findings = detect_provider(home)
     verdict = detected if args.provider == "auto" else args.provider
+    detected, findings = detect_provider(home)
+    harness_verdict = args.harness if args.harness != "auto" else None
+    if harness_verdict is None:
+        # Auto-detect harness
+        hermes_home_path = hermes_home()
+        hermes_config = hermes_home_path / "config.yaml"
+        claude_settings_cwd = Path(".claude/settings.json")
+        claude_settings_home = Path.home() / ".claude/settings.json"
+        
+        if hermes_config.exists():
+            harness_verdict = "hermes"
+        elif claude_settings_cwd.exists() or claude_settings_home.exists():
+            harness_verdict = "claude-code"
+        else:
+            harness_verdict = "mcp"
+            print("  No Hermes or Claude Code detected; defaulting to MCP generic mode.")
+            print("  Manual wiring may be needed for your MCP client.")
+    else:
+        print(f"  Using --harness override: {harness_verdict}")
+
 
     print("MemLock setup")
     print(f"  HERMES_HOME: {home}")
@@ -354,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"Detected provider: {detected} (overridden by --provider)")
     print(f"Using provider:   {verdict}")
+    print(f"Using harness:    {harness_verdict}")
     if verdict == "none":
         print()
         print(
@@ -366,7 +395,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── apply ────────────────────────────────────────────────────────
     if args.dry_run:
-        planned = desired_memlock_section(verdict, args)
+        planned = desired_memlock_section(verdict, args, harness_verdict)
         print()
         print("Dry run — would update the memlock: section of config.yaml with:")
         for key, val in planned.items():
@@ -375,7 +404,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  (note: {home / 'config.yaml'} does not exist yet)")
         return exit_code
 
-    updates = desired_memlock_section(verdict, args)
+    updates = desired_memlock_section(verdict, args, harness_verdict)
     backup = backup_config(home)
     if backup:
         print(f"\nBacked up config to {backup.name}")
