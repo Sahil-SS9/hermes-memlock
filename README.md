@@ -255,26 +255,48 @@ for you.
 
 | Command | Description |
 |---|---|
-| `/guard` | Show integrity score, anchor list, drift log |
+| `/guard` | Show integrity score, anchor list, version history, drift log |
 
 ## Tool: `guard_pin`
 
-Pin, update, or unpin a standing instruction.
+Pin, update, roll back, or unpin a standing instruction.
 
 | Param | Required | Description |
 |---|---|---|
 | `text` | For pin/update | The instruction to preserve (or the new wording for an update) |
-| `pin_id` | For update | Anchor id of an existing pin to update **in place**: same id retained, previous version kept in history (last 5 versions per pin) |
+| `pin_id` | For update/rollback | Anchor id of an existing pin. Update: same id retained, previous version kept in history (last 5 versions per pin). Rollback: restores a prior version from history |
+| `action` | For rollback | Set to `"rollback"` to restore the selected prior version; the displaced current state is pushed onto history (nothing is destroyed) |
 | `priority` | No | 1-100 (default 50). Higher values get rehydrated first |
 | `reminder` | No | Short version for re-insertion (auto-trimmed) |
 | `probes` | No | Distinctive keywords for drift detection (auto-derived from the current text on pin/update) |
-| `scope` | No | `session` (default, dies with session) or `global` (persists across sessions). On update: a global pin's durable copy is re-synced automatically. On unpin: `scope=global` also removes the durable copy |
+| `scope` | No | `session` (default, dies with session) or `global` (persists across sessions). On update/rollback: a global pin's durable copy is re-synced automatically. On unpin: `scope=global` also removes the durable copy |
 | `unpin` | For unpin | Anchor id to remove |
 
 ```python
 # Update an existing pin in place — same anchor id, history kept:
 guard_pin(pin_id="pin_1755000000_0", text="Always reply in numbered lists")
+
+# Roll back to the previous version (displaced state pushed to history):
+guard_pin(action="rollback", pin_id="pin_1755000000_0")
 ```
+
+### Pin integrity (v0.5.1)
+
+Durable pins are covered by a sha256 manifest (`memlock/persist/manifest.json`).
+A pin file whose bytes no longer match its recorded hash is **quarantined** —
+skipped with a warning, never silently loaded — so tampered or corrupted pins
+cannot poison agent behaviour. Session stores carry an advisory `self_sha256`
+checksum as well.
+
+### MCP server mode & other harnesses
+
+MemLock's core is harness-agnostic (`memlock_core/`). Beyond the Hermes plugin:
+
+- **Claude Code** — `python3 memlock_setup.py --harness claude-code` installs
+  SessionStart/PreCompact hooks into `.claude/settings.json`.
+- **Any MCP client** — run `python3 -m mcp_server`; tools: `memlock_pin`,
+  `memlock_unpin`, `memlock_update`, `memlock_status`, `memlock_audit`.
+- See [SKILL.md](SKILL.md) and the Portability Matrix above.
 
 ### Cross-session persistence
 
