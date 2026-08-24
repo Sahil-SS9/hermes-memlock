@@ -1,5 +1,5 @@
 name: memlock
-version: "0.4.0"
+version: "0.5.1"
 description: "MemLock — re-asserts pinned standing instructions after context compaction. Detects compaction via SUMMARY_PREFIX scan, audits which pinned anchors survived, rehydrates casualties. Supports keyword and windowed semantic detection, on-drift and always inject modes."
 author: Sahil Saghir (KENSEI)
 hooks:
