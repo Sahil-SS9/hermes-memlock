@@ -6,3 +6,9 @@ hooks:
   - pre_llm_call
   - on_session_start
   - on_session_end
+provides_tools:
+  - guard_pin
+provides_hooks:
+  - on_session_end
+  - on_session_start
+  - pre_llm_call
